@@ -1,0 +1,842 @@
+$VERSION = '0.01';
+
+pp_bless('PDL::Graphics::X');
+
+###
+#
+# OO interface to X windows
+#
+# The approach is that each X object will have an associated X window. The 
+# X object stores the X window and the associated GC. The object is responsible 
+# for creating & destroying the window, for relaying commands between perl 
+# and the window & (eventually...) making sure that the window has not been 
+# destroyed in some other way (i.e. the user closed the window directly w/ the mouse).
+#
+# Not the best convention perhaps, but routines that I wrote that call X
+# start with '_X' and "real" X routines start with 'X'.
+#
+# Hazen 2/05
+#
+###
+
+###
+# Header files
+###
+
+pp_addhdr('
+	#include <X11/X.h>
+	#include <X11/Xlib.h>
+	#include <X11/Xutil.h>
+	#include <X11/cursorfont.h>
+
+	static int screen;
+	static Display *display;
+	static Window root_window;
+	
+	static Window *hack_win;
+	static GC *hack_gc;
+');
+
+###
+# Routines that interface to X
+###
+
+pp_addxs(<<'EOC');
+
+# initialize X
+
+int
+_XInitialize()
+	CODE:
+		int is_good;
+
+		is_good = 0;
+		display = XOpenDisplay(NULL);
+		if(display == NULL){
+			printf("PDL::Graphics::X : Attempt to initialize X failed\n");
+		} else {
+			is_good = 1;
+			screen = DefaultScreen(display);
+			root_window = RootWindow(display,screen);
+		}
+		RETVAL = is_good;
+	OUTPUT:
+		RETVAL
+
+# open an X window of specified size & background
+
+Window *
+_XNewWindow(sx, sy, bg)
+	int sx
+	int	sy
+	unsigned long bg
+	CODE:
+		Window *X_win;
+		
+		X_win = (Window *) malloc (sizeof(Window));
+		*X_win = XCreateSimpleWindow(display, root_window, 0, 0, sx, sy, 1, 0, bg);
+		XMapWindow(display, *X_win);
+		XFlush(display);
+		XSelectInput(display, *X_win, NoEventMask);
+		RETVAL = X_win;
+	OUTPUT:
+		RETVAL
+
+# get the GC of a window
+
+GC *
+_XGetGC(X_win)
+	Window *X_win
+	CODE:
+		GC *X_gc;
+		XGCValues values;
+
+		X_gc = (GC *) malloc (sizeof(GC));
+		*X_gc = XCreateGC(display, *X_win, 0, &values);
+		RETVAL = X_gc;
+	OUTPUT:
+		RETVAL
+
+# set the window title
+
+void
+_XSetWindowName(X_win, name)
+	Window *X_win
+	char *name
+	CODE:
+		char **stringList;
+		XTextProperty text_prop;
+		
+		stringList = (char **) malloc(sizeof(char *));
+		stringList[0] = name;
+		XStringListToTextProperty(stringList, 1, &text_prop);
+		XSetWMName(display, *X_win, &text_prop);
+		XFlush(display);
+		free(stringList);
+		# close a window & free storage
+
+void
+_XCloseWindow(X_win)
+	Window *X_win
+	CODE:
+		XDestroyWindow(display, *X_win);
+		XFlush(display);
+		free(X_win);
+
+# free a GC
+
+void
+_XFreeGC(X_gc)
+	GC *X_gc
+	CODE:
+		free(X_gc);
+	
+# close the display
+
+void
+_XCloseDisplay()
+	CODE:
+		XCloseDisplay(display);
+
+# change the foreground color
+
+void
+_XSetForeground(X_gc, color)
+	GC *X_gc
+	int color
+	CODE:
+		XSetForeground(display, *X_gc, color);
+
+# change the line style
+
+void
+_XLineStyle(X_gc, line_wd, line_s)
+	GC *X_gc
+	int line_wd
+	int line_s
+	CODE:
+		XSetLineAttributes(display, *X_gc, line_wd, line_s, CapButt, JoinMiter);
+
+# draw a rectangle in a window
+
+void
+_XDrawRectangle(X_win, X_gc, x, y, width, height)
+	Window *X_win;
+	GC *X_gc;
+	int x
+	int y
+	int width
+	int height
+	CODE:
+		XDrawRectangle(display, *X_win, *X_gc, x, y, width, height);
+		XFlush(display);
+
+# draw a string in a window
+
+void
+_XDrawString(X_win, X_gc, x, y, text)
+	Window *X_win
+	GC *X_gc
+	int x
+	int y
+	char *text
+	CODE:
+		XDrawString(display, *X_win, *X_gc, x, y, text, strlen(text));
+		XFlush(display);
+
+# draw a line in a window
+
+void
+_XDrawLine(X_win, X_gc, x1, y1, x2, y2)
+	Window *X_win
+	GC *X_gc
+	int x1
+	int y1
+	int x2
+	int y2
+	CODE:
+		XDrawLine(display, *X_win, *X_gc, x1, y1, x2, y2);
+		XFlush(display);
+
+# resize a window
+
+void
+_XResizeWindow(X_win, w, h)
+	Window *X_win
+	int w
+	int h
+	CODE:
+		XGCValues values;
+		XWindowAttributes win_attr;
+
+		XGetWindowAttributes(display, *X_win, &win_attr);
+		if(win_attr.width < w){
+			if(win_attr.height < h){
+				XResizeWindow(display, *X_win, w, h);
+				win_attr.height = h;
+			} else {
+				XResizeWindow(display, *X_win, w, win_attr.height);
+			}
+		}
+		if(win_attr.height < h){
+			XResizeWindow(display, *X_win, win_attr.width, h);
+		}
+		XFlush(display);
+
+# clear a window
+
+void
+_XClearWindow(X_win)
+	Window *X_win
+	CODE:
+		XClearWindow(display, *X_win);
+		XFlush(display);
+
+# block until we get a button release event, return event coordinates
+# FIXME : lame hack to pass back x & y position. I'm pretty sure that 
+#    I can return these directly, i.e. ($x, $y) = _X11GetMouse($win)
+#    but _XGetMouse(wn, OUTLIST int x, OUTLIST int y) seems to
+#    require me to pass in 3 parameters...
+
+char *
+_XGetMouse(X_win)
+	Window *X_win
+	CODE:
+		char temp[40];
+		XEvent aEvent;
+		Cursor cursor;
+		
+		cursor = XCreateFontCursor(display, XC_crosshair);
+		XDefineCursor(display, *X_win, cursor);
+		XSelectInput(display, *X_win, ButtonReleaseMask);
+		XMaskEvent(display, ButtonReleaseMask, &aEvent);
+		sprintf(temp, "%d %d", aEvent.xbutton.x, aEvent.xbutton.y);
+		XSelectInput(display, *X_win, NoEventMask);
+		XUndefineCursor(display, *X_win);
+		XFlush(display);
+		
+		RETVAL = temp;
+	OUTPUT:
+		RETVAL
+
+# returns the name of the first font found that matches our search pattern
+
+char *
+_XGetFont(search, suppress)
+	char *search
+	int suppress
+	CODE:
+		short i;
+		int count;
+		char **list;
+
+		list = XListFonts(display, search, 2000, &count);
+		RETVAL = "not_found";
+		if((suppress == 0)&&(count > 0)){
+			printf("%d fonts available\n", count);
+			for(i=0;i<count;i++){
+				printf("  %s\n",list[i]);
+			}
+		}
+		if(count > 0){
+			RETVAL = list[0];
+		}
+	OUTPUT:
+		RETVAL
+
+# load a font into the current GC
+
+void
+_XLoadFont(X_gc, font_name)
+	GC *X_gc
+	char *font_name
+	CODE:
+		Font the_font;
+		
+		the_font = XLoadFont(display, font_name);
+		XSetFont(display, *X_gc, the_font);
+
+# hack-o-rama until I can figure out how to extend the PDL::PP typemap
+
+void
+_XPDLPPHack(X_win, X_gc)
+	Window *X_win
+	GC *X_gc
+	CODE:
+		hack_win = X_win;
+		hack_gc = X_gc;
+		
+EOC
+
+###
+# PP sub-routines
+###
+
+# draw a polyline
+
+pp_def('_XPolyLine',
+	Pars => 'x(n); y(n)',
+	GenericTypes => [L],
+	Code => '
+		int i,j;
+		
+		for(i=0;i<($SIZE(n)-1);i++){
+			j = i+1;
+			XDrawLine(display, *hack_win, *hack_gc, $x(n=>i), $y(n=>i), $x(n=>j), $y(n=>j));
+		}
+		XFlush(display);
+');
+
+# draw a bitmap
+
+pp_def('_XDrawBitmap',
+	Pars => 'bm(n,m)',
+	OtherPars => 'int x; int y',
+	GenericTypes => [L],
+	Code => '
+		int i, j;
+		XImage *picture;
+		
+		picture = XGetImage(display, *hack_win, 0, 0, $SIZE(n), $SIZE(m), AllPlanes, ZPixmap);
+		for(i=0;i<$SIZE(n);i++){
+			for(j=0;j<$SIZE(m);j++){
+				XPutPixel(picture, i, j, $bm(n=>i,m=>j));
+			}
+		}
+		XPutImage(display, *hack_win, *hack_gc, picture, 0, 0, $COMP(x), $COMP(y), $SIZE(n), $SIZE(m));
+		XDestroyImage(picture);
+		XFlush(display);
+');
+
+###
+# Perl subroutines
+###
+
+pp_addpm(<<'EOD');
+
+## we need PDL
+
+use PDL;
+
+###
+# Global variables
+###
+
+my $number_of_X_objects = 0;				# keeps track of how many X objects exist
+my $warning_message = ">>> X Warning : "; 	# generic start of warning messages
+
+my %default_options = (						# default options
+	SIZE_X => 400,
+	SIZE_Y => 300,
+	WIN_TITLE => "X",
+	BACK_COLOR => [1.0, 1.0, 1.0],
+	LINEWIDTH => 1,
+	LINESTYLE => 0,
+	COLOR => [0.0, 0.0, 0.0],
+	CHARSIZE => 12,
+	FONT_NAME => "courier",
+	X_FONT => ""
+);
+
+###
+# private sub-routines
+###
+
+# parse options hashes
+
+sub _parseOptions {
+	my $input_options = shift;
+	my $default_options = shift;
+
+	while ( my($temp_key, $temp_value) = each %{$input_options} ) {
+		if (exists $default_options->{$temp_key}) {
+			$default_options->{$temp_key} = $temp_value;
+		} else {
+			print "$warning_message no such option : $temp_key\n";
+		}
+	}
+}
+
+# convert a color array to a long, which will give you _roughly_ the right color
+
+sub _RGBToLong {
+	my $rgb = shift;
+	my $color = ($rgb->[0] * 255.0) * 256.0 * 256.0 + ($rgb->[1] * 255.0) * 256.0 + ($rgb->[2] * 255.0);
+	return $color;
+}
+
+# create the default gray-scale color table
+
+sub _createGrayScale {
+	$color_table = long(xvals(256.0)*256.0*256.0 + xvals(256.0)*256.0 + xvals(256.0));
+	return($color_table);
+}
+
+# setup the default font, try and find a scalable "medium" font of specified type
+# the first one that is found is the one that is used
+
+sub _setupFont {
+	my $font_family = shift;
+	my $search_string = "-*-" . $font_family . "-medium-r-normal-*-0-0-*-*-*-0-*-*";
+	my $x_font = _XGetFont($search_string,1);
+	unless($x_font =~ /not_found/){
+		$x_font =~ s!-0!-\*!g;
+	} else {
+		print "No $font_family family scalable fonts were found\n";
+	}
+	return $x_font;
+}
+
+###
+# Object methods
+###
+
+# create a new X object & associated X window
+
+sub new {
+	my $self = shift;
+	my $opt = shift;
+
+	my %wopt = %default_options;
+	if(defined($opt)){ _parseOptions($opt, \%wopt); }
+	my $is_good = 1;
+	if($number_of_X_objects == 0){ $is_good = _XInitialize(); }
+	if($is_good){
+		my $X_win = _XNewWindow($wopt{"SIZE_X"}, $wopt{"SIZE_Y"}, _RGBToLong($wopt{"BACK_COLOR"}));
+		my $X_gc = _XGetGC($X_win);
+		_XSetWindowName($X_win, $wopt{"WIN_TITLE"} . " (" . $number_of_X_objects . ")");
+		my $c_table = _createGrayScale();
+		$wopt{"X_FONT"} = _setupFont($wopt{"FONT_NAME"});
+		$number_of_X_objects++;
+		my $param = {X_win => $X_win, X_gc => $X_gc, c_table => $c_table, options => \%wopt};
+		return(bless $param, $self);
+	} else {
+		print "X initialize failed\n";
+		return undef;
+	}
+}
+
+# catch object destroy so that we can close the X window & free up the associated memory
+
+sub DESTROY {
+	my $self = shift;
+	_XFreeGC($self->{X_gc});
+	_XCloseWindow($self->{X_win});
+	$number_of_X_objects--;
+	if($number_of_X_objects == 0){
+		_XCloseDisplay();
+	}
+}
+
+# display a pdl as a 2 dimensional bitmap
+
+sub imag {
+	my $self = shift;
+	my ($the_bitmap, $options) = @_;
+	my %dopt = (	# default display options
+		DEST_X => 0,
+		DEST_Y => 0,
+		DEST_W => -1,
+		DEST_H => -1,
+		AUTO_SCALE => 0,
+		MIN => 0.0,
+		MAX => 255.0,
+	);
+	
+	my $num_dims;
+	my @bmp_dims;
+	if (defined($the_bitmap)) {
+		$num_dims = $the_bitmap->ndims();
+		@bmp_dims = $the_bitmap->dims();
+		unless (($num_dims == 2) || ($num_dims == 3)) { 
+			print "$warning_message a pdl with $num_dims dimensions is not supported\n";
+			return 0;
+		}
+		if ($options) { _parseOptions($options, \%dopt); }
+	} else {
+		print "$warning_message no pdl was supplied for imag\n";
+		return 0;
+	}
+
+	# if the user didn't provide the width and height of the part that they want to show, default to showing the whole thing
+		
+	if ($dopt{"DEST_W"} == -1) {
+		$dopt{"DEST_W"} = $bmp_dims[0];
+		$dopt{"DEST_W"} = $bmp_dims[1];
+	}
+	if ($dopt{"DEST_H"} == -1) {
+		$dopt{"DEST_H"} = $bmp_dims[0];
+		$dopt{"DEST_H"} = $bmp_dims[1];
+	}
+	
+	# trim the pdl to the desired size
+	
+	if($num_dims == 2){
+		my $dw = $dopt{"DEST_W"} - 1;
+		my $dh = $dopt{"DEST_H"} - 1;
+		$the_bitmap = $the_bitmap->slice("0:$dw,0:$dh")->copy();
+	} else {
+		my $dw = $dopt{"DEST_W"} - 1;
+		my $dh = $dopt{"DEST_H"} - 1;
+		$the_bitmap = $the_bitmap->slice("0:$dw,0:$dh,:")->copy();
+	}
+
+	# check whether the user wants to auto-scale the image
+	
+	if ($dopt{"AUTO_SCALE"}){
+		$dopt{"MIN"} = min($the_bitmap);
+		$dopt{"MAX"} = max($the_bitmap);
+	}
+	
+	# re-scale the image if necessary
+	
+	if (($dopt{"MIN"} != 0.0) || ($dopt{"MAX"} != 255.0)){
+		if($debug_on){
+			print "$debug_message re-scaling image " . $dopt{"MIN"} . " - " . $dopt{"MAX"} . "\n";
+ 		}
+		$the_bitmap = float($the_bitmap);
+		if($dopt{"MIN"} < $dopt{"MAX"}) {
+			$the_bitmap = ($the_bitmap - $dopt{"MIN"}) * 255.0 / ($dopt{"MAX"} - $dopt{"MIN"});
+		} else {
+			print "$warning_message min is greater then max, image re-scale aborted\n";
+		}
+	}
+	
+	# threshold the image so that it doesn't roll over
+	
+	$the_bitmap = $the_bitmap * ($the_bitmap >= 0.0);
+	$the_bitmap -= 255.0;
+	$the_bitmap = $the_bitmap * ($the_bitmap <= 0.0);
+	$the_bitmap += 255.0;
+	$the_bitmap = long($the_bitmap);
+	
+	# if this is a false color image, use the color table, otherwise convert as true color
+
+	if ($num_dims == 2) {
+		$the_bitmap = index($self->{c_table}, $the_bitmap);	
+	} else {
+		my $temp = 256*256*($the_bitmap->slice(":,:,0")->copy());
+		$temp += 256*($the_bitmap->slice(":,:,1"));
+		$temp += $the_bitmap->slice(":,:,2");
+		$the_bitmap = $temp->squeeze();
+	}
+			
+	# resize the window, if necessary to accomodate the bitmap
+		
+	_XResizeWindow($self->{X_win}, $dopt{"DEST_W"} + $dopt{"DEST_X"}, $dopt{"DEST_H"} + $dopt{"DEST_Y"});
+
+	# display the image
+
+	_XPDLPPHack($self->{X_win}, $self->{X_gc});
+	_XDrawBitmap($the_bitmap, $dopt{"DEST_X"}, $dopt{"DEST_Y"});
+}
+
+# Makes a local copy of a user supplied color table. It is assumed that the color 
+# table pdl is of the form ($levels, $red, $green, $blue), a 256 x 4 pdl, as would 
+# be generated by the command '$color_table = cat(lut_data("xx"))'. $levels is ignored. 
+# $red, $green & $blue are assumed to range from 0 to 1.
+
+sub ctab {
+	my $self = shift;
+	my $col_tab = shift;
+	if (defined($col_tab)) {
+		if (($col_tab->getdim(0) == 256)&&($col_tab->getdim(1) == 4)){
+			$self->{c_table} = long(rint(255.0 * ($col_tab->slice(":,3"))->copy));
+			$self->{c_table} += 256 * long(rint(255.0 * ($col_tab->slice(":,2"))->copy));
+			$self->{c_table} += 256 * 256 * long(rint(255.0 * ($col_tab->slice(":,1"))->copy));
+			$self->{c_table} = $self->{c_table}->squeeze();
+		} else {
+			print "$warning_message color table has the wrong dimensions (256 x 4 expected)";
+		}
+	} else {
+		print "$warning_message no color table supplied";
+	}
+}
+
+# Draws vectors of x & y values as interconnected point
+
+sub line {
+	my $self = shift;
+	my ($x, $y, $options) = @_;
+		
+	if (defined($y)) {
+		if (defined($options)){ _parseOptions($options, $self->{options}); }
+	} else {
+		print "$warning_message no x & y were supplied for line\n";
+		return 0;
+	}
+	if($x->dim(0) != $y->dim(0)){
+		print "x & y are not of the same size\n";
+		return;
+	}
+	_XLineStyle($self->{X_gc}, $self->{options}->{"LINEWIDTH"}, $self->{options}->{"LINESTYLE"});
+	_XSetForeground($self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
+	_XPDLPPHack($self->{X_win}, $self->{X_gc});
+	_XPolyLine($x, $y);
+}
+
+# erases the window
+
+sub erase {
+	my $self = shift;
+	_XClearWindow($self->{X_win});
+}
+
+# draws text onto the window
+
+sub text {
+	my $self = shift;
+	my ($text, $x, $y, $options) = @_;
+	
+	my $old_name = $self->{options}->{"FONT_NAME"};
+	if(defined($y)) {
+		if (defined($options)){ _parseOptions($options, $self->{options}); }
+	} else {
+		print "$warning_message you must specify : text, x, y for text\n";
+		return 0;
+	}
+	unless($old_name eq $self->{options}->{"FONT_NAME"}){
+		$self->{options}->{"X_FONT"} = _setupFont($self->{options}->{"FONT_NAME"});
+	}
+	unless($self->{options}->{"X_FONT"} eq "not_found"){
+		my $font_name = $self->{options}->{"X_FONT"};
+		$font_name =~ s!--\*!--$self->{options}->{"CHARSIZE"}!;
+		_XLoadFont($self->{X_gc}, $font_name);
+	}
+	_XSetForeground($self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
+	_XDrawString($self->{X_win}, $self->{X_gc}, $x, $y, $text);
+}
+
+# returns coordinates of mouse click in the window
+
+sub cursor {
+	my $self = shift;
+
+	my $event;
+	$event = _XGetMouse($self->{X_win});
+	my ($x, $y) = split(/ /, $event);
+	return ($x, $y);
+}
+
+EOD
+
+# this is a OO module, so export nothing
+pp_export_nothing();
+
+###
+# Documentation
+###
+
+pp_addpm({At=>'Bot'},<<'EOD');
+
+=head1 NAME
+
+PDL::Graphics::X - PDL OO access to X windows
+
+=head1 SYNOPSIS
+
+  # example 1
+
+  use PDL;
+  use PDL::Graphics::X;
+  
+  my $x_size = 255; my $y_size = 255;
+  my $win1 = PDL::Graphics::X->new({SIZE_X => $x_size, SIZE_Y => $y_size});
+  my $a = xvals(zeroes(byte,$x_size,$y_size));
+  $win1->imag($a);
+
+  # example 2
+
+  use PDL;
+  use PDL::Graphics::X;
+
+  my $win1 = PDL::Graphics::X->new({WIN_TITLE => "PDL", SIZE_X => 210, SIZE_Y => 210});
+  my $x = pdl(10, 100, 100, 10);
+  my $y = pdl(10, 10, 100, 100);
+  $win1->line($x, $y, {COLOR => [1,0,0], LINEWIDTH => 5});
+
+=head1 DESCRIPTION
+
+This module interfaces PDL directly to X windows in a OO fashion. Each X object has an associated X window and handles opening, closing and drawing in the associated window. Hopefully it is reasonably intuitive to use. The vision is that this will serve as a base upon which other fully native PDL graphics modules could be built.
+
+=head1 FUNCTIONS
+
+=head2 new
+
+=for ref
+
+Constructor for a new X window object.
+
+=for usage
+
+  Usage: my $win1 = PDL::Graphics::X->new(); # open the window with the defaults
+  Usage: my $win1 = PDL::Graphics::X->new({WIN_TITLE => "PDL", SIZE_X => 210, SIZE_Y => 210});
+                 				
+Creates a new X object & its associated X window.
+
+Options recognized :
+
+      SIZE_X - window x size in pixels (default = 400)
+      SIZE_Y - window y size in pixels (default = 300)
+   WIN_TITLE - A title for the window, if desired (default = "X")
+  BACK_COLOR - [r, g, b] the windows background color (default = [1.0, 1.0, 1.0], i.e. white)
+ 
+=head2 imag
+
+=for ref
+
+Display a PDL as a bitmap.
+
+=for usage
+
+  Usage: $win1->imag($my_img); # display an image with default size and scaling
+  Usage: $win1->imag($my_img, {AUTO_SCALE => 1.0}); # display an auto-scaled image
+
+Displays a PDL as a bitmap. The PDL can be of size either (m,n) or (m,n,3). PDLs of size (m,n) are converted to indexed color based on the current color table (see ctab). PDLs of size (m,n,3) are displayed as true-color images with the last dimension specifying the color (RGB). Unless a re-scaling is specified, the minimum value displayed is 0.0 and the maximum is 255.0. If the PDL is larger then the window then the window will be re-scaled to accomodate the PDL;
+
+Options recognized :
+
+      DEST_X - position of the left side of the bitmap in pixels (default = 0)
+      DEST_Y - position of the bottom of the bitmap in pixels (default = 0)
+      DEST_W - width of the bitmap to be displayed (default = width of the PDL)
+      DEST_H - height of the bitmap to be displayed (default = height of the PDL)
+  AUTO_SCALE - if set equal to 1, the PDL will be rescaled such that its 
+                     minimum value is 1 and its max is 255 (default = 0)
+         MIN - the minimum value to be displayed (default = 0.0)
+         MAX - the maximum value to be displayed (default = 255.0)
+	
+=head2 ctab
+
+=for ref
+
+Set the color table
+
+=for usage
+
+  Usage: $win1->ctab(cat(lut_data('idl5'))); # set the color table to idl5
+
+Makes a local copy of a user supplied color table. The color table must be a 256 x 4 pdl of the form (l,r,g,b), as would be generated by the command '$ct = cat(lut_data("xyz"))'. The l value is ignored. The r, g and b values should be in the range 0.0 - 1.0.
+
+=head2 line
+
+=for ref
+
+Draws a vector as connected points.
+
+=for usage
+
+  Usage: $win1->line($x, $y, {COLOR => [0,0,0], LINEWIDTH => 5}); # draw black line of width 5
+
+Draw a poly-line between a set of points given by two PDLs of size (n). The first PDL gives the x position & the second piddle gives the y position of the individual points, n is the total number of points.
+
+Options recognized
+
+  LINEWIDTH - line width
+  LINESTYLE - line style (0 = normal, 1 = dashed)
+      COLOR - [r, g, b] color of the line
+
+=head2 erase
+
+=for ref
+
+Erases the contents of the window.
+
+=for usage
+
+  Usage: $win1->erase();
+
+Resets the contents of the window to the background color.
+
+=head2 text
+
+=for ref
+
+Draw text
+
+=for usage
+
+  Usage: $win1->text("hello", 10, 20);
+
+Draws text. How fonts are currently dealt with is imperfect at best. So that the font size can easily be changed, a search is performed for a scalable font with specified font name. If such a font cannot be found then the text will be displayed with the default X font and no font scaling.
+
+Options recognized
+
+  FONT_NAME - name of the font family (default = "courier")
+   CHARSIZE - desired font size in points
+      COLOR - [r, g, b] color of the font
+
+=head2 cursor
+
+=for ref
+
+Returns the location of next mouse click in the window
+
+=for usage
+
+  Usage : my($x,$y) = $win1->cursor();
+
+Returns the x & y locations of the next mouse click in the window.
+
+=head1 KNOWN ISSUES
+
+The module currently has two (somewhat related) problems. The first is that if you close one of the windows with the mouse you will close all the windows (or at least thats how it works on my OS-X box). The second is that objects are not aware that their associated windows have been closed, so when you next use one of the objects your program will crash due to a memory error. If you want to close a single window you can due this by setting it equal to undef (i.e. $win1 = undef;). I'm currently working on trying to resolve both of these issues & suggestions by X masters are welcomed.
+
+Font handling is poorly implemented, again suggestions on a better approach are welcomed.
+
+Depending on the context RGB triples do not always give you the color you might have desired. They seem to work fine in the context of bitmaps, but more poorly in the context of line & text coloring.
+
+=head1 BUGS
+
+...
+
+=head1 AUTHOR
+
+Hazen Babcock (hbabcockos1@mac.com)
+
+This library is free software; you can redistribute it and/or modify it under the same terms as Perl itself.
+
+=cut
+
+EOD
+
+pp_done();

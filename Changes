@@ -1,0 +1,12 @@
+Revision history for Perl extension PDL::Graphics::X.
+
+0.01  Sun Feb 20 2005
+        - a alpha-alpha version finished for release
+	   has the following functions :
+	     new
+	     imag
+	     ctab
+	     line
+	     line
+	     text
+	     cursor

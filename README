@@ -1,0 +1,26 @@
+PDL/Graphics/X version 0.01
+===========================
+
+This module allows you to interface directly to X windows with PDL.
+A small, but hopefully useful, set of drawing and cursor functions 
+are provided.
+
+INSTALLATION
+
+To install this module type the following:
+
+   perl Makefile.PL
+   make
+   make install
+
+DEPENDENCIES
+
+A working version of X11.
+
+COPYRIGHT AND LICENCE
+
+Copyright (C) 2005 Hazen Babcock
+
+This library is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself. 
+
