@@ -1,7 +1,7 @@
 Revision history for Perl extension PDL::Graphics::X.
 
 0.01  Sun Feb 20 2005
-        - a alpha-alpha version finished for release
+       a alpha-alpha version finished for release
 	   has the following functions :
 	     new
 	     imag
@@ -14,7 +14,7 @@ Revision history for Perl extension PDL::Graphics::X.
 0.02  Mon Feb 21 2005
 		Cleaned up handling of Window * & GC * passed through pp_def as 
 		   suggested by Andres Jordan
-	   added the following functions (with no fill option as yet):
+	    added the following functions (with no fill option as yet):
 		 rect
 		 circle
 		 ellipse
@@ -29,3 +29,26 @@ Revision history for Perl extension PDL::Graphics::X.
       Sat Mar 5 2005
       	Implemented broken pipe handling caused by breaking X client/
       	   server connections
+
+0.04  Sun Mar 6 2005
+		Changed functions to return 1 if they fail because the window
+		   is closed
+        Added functionality necessary to support fits display module,
+           i.e. the following functions :
+         we_exist
+         winsize
+         resize
+
+	  Tues Mar 8 2005
+	    Returns undefined if it can't open a window rather then crashing
+	    
+	  Sun Mar 13 2005
+	    Fixed problem with calculating default bitmap size
+	   
+	  Sun Mar 27 2005
+	    Reorganized xs functions so that they are now alphabetical
+	    Added (lame) support of drawing rotated text. Its not actually 
+	      rotated, just drawn along a rotated baseline.
+	    Added error handling to cursor so that if the user clicked on
+	      the window and closed it all would not be lost.
+	      

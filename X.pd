@@ -1,4 +1,4 @@
-$VERSION = '0.03';
+$VERSION = '0.04';
 
 pp_bless('PDL::Graphics::X');
 
@@ -46,6 +46,7 @@ static int broken_pipe;
  
 int IOErrorHandler (Display *dpy) {
 	printf("Warning, window is already closed\n");
+	broken_pipe = 1;
 	longjmp(XIOrecover, 1);
 	printf("jump failed...\n");
 }
@@ -63,6 +64,21 @@ void sig_pipe(int n){
 
 pp_addxs(<<'EOC');
 
+# checks whether or not a display pointer is null
+# FIXME: could this be done in Perl?
+
+int
+_DisplayPtrCheck(X_disp)
+	Display *X_disp
+	CODE:
+		if(X_disp == NULL){
+			RETVAL = 0;
+		} else {
+			RETVAL = 1;
+		}
+	OUTPUT:
+		RETVAL
+
 # set-up broken pipe error handler
 
 void
@@ -72,73 +88,47 @@ _InitSigPipe()
 			printf("Unable to set up signal handler, beware X!\n");
 		}
 
-# open a new display (one per window)
+# check whether the window has been "externally" destroyed
+# done by polling X for some information & seeing if this
+# generates a broken pipe
 
-Display *
-_XNewDisplay()
-	CODE:
-		int screen;
-		Display *X_disp;
-		
-		X_disp = XOpenDisplay(NULL);
-		screen = DefaultScreen(X_disp);
-		root_window = RootWindow(X_disp,screen);
-		RETVAL = X_disp;
-	OUTPUT:
-		RETVAL
-
-# open an X window of specified size & background
-
-Window *
-_XNewWindow(X_disp, sx, sy, bg)
-	Display *X_disp
-	int sx
-	int	sy
-	unsigned long bg
-	CODE:
-		Window *X_win;
-		
-		X_win = (Window *) malloc (sizeof(Window));
-		*X_win = XCreateSimpleWindow(X_disp, root_window, 0, 0, sx, sy, 1, 0, bg);
-		XMapWindow(X_disp, *X_win);
-		XFlush(X_disp);
-		RETVAL = X_win;
-	OUTPUT:
-		RETVAL
-
-# get the GC of a window
-
-GC *
-_XGetGC(X_disp, X_win)
+int
+_XCheck(X_disp, X_win)
 	Display *X_disp
 	Window *X_win
 	CODE:
-		GC *X_gc;
-		XGCValues values;
+		int is_broken;
+		XWindowAttributes win_attr;
 
-		X_gc = (GC *) malloc (sizeof(GC));
-		*X_gc = XCreateGC(X_disp, *X_win, 0, &values);
-		RETVAL = X_gc;
+		is_broken = 0;
+		broken_pipe = 0;
+		if(setjmp(XIOrecover) == 0) XSetIOErrorHandler(IOErrorHandler);
+		if(broken_pipe){
+			is_broken = 1;
+		} else {
+			XGetWindowAttributes(X_disp, *X_win, &win_attr);
+		}
+		RETVAL = is_broken;
 	OUTPUT:
 		RETVAL
 
-# set the window title
+# clear a window
 
 void
-_XSetWindowName(X_disp, X_win, name)
+_XClearWindow(X_disp, X_win)
 	Display *X_disp
 	Window *X_win
-	char *name
 	CODE:
-		char **stringList;
-		XTextProperty text_prop;
-		
-		stringList = (char **) malloc(sizeof(char *));
-		stringList[0] = name;
-		XStringListToTextProperty(stringList, 1, &text_prop);
-		XSetWMName(X_disp, *X_win, &text_prop);
+		XClearWindow(X_disp, *X_win);
 		XFlush(X_disp);
-		free(stringList);
+
+# close the display
+
+void
+_XCloseDisplay(X_disp)
+	Display *X_disp
+	CODE:
+		XCloseDisplay(X_disp);
 		# close a window & free storage
 
 void
@@ -149,59 +139,7 @@ _XCloseWindow(X_disp, X_win)
 		XDestroyWindow(X_disp, *X_win);
 		XFlush(X_disp);
 		free(X_win);
-
-# free a GC
-
-void
-_XFreeGC(X_gc)
-	GC *X_gc
-	CODE:
-		free(X_gc);
 	
-# close the display
-
-void
-_XCloseDisplay(X_disp)
-	Display *X_disp
-	CODE:
-		XCloseDisplay(X_disp);
-
-# change the foreground color
-
-void
-_XSetForeground(X_disp, X_gc, color)
-	Display *X_disp
-	GC *X_gc
-	int color
-	CODE:
-		XSetForeground(X_disp, *X_gc, color);
-
-# change the line style
-
-void
-_XLineStyle(X_disp, X_gc, line_wd, line_s)
-	Display *X_disp
-	GC *X_gc
-	int line_wd
-	int line_s
-	CODE:
-		XSetLineAttributes(X_disp, *X_gc, line_wd, line_s, CapButt, JoinMiter);
-
-# draw a rectangle in a window
-
-void
-_XDrawRectangle(X_disp, X_win, X_gc, x, y, width, height)
-	Display *X_disp
-	Window *X_win;
-	GC *X_gc;
-	int x
-	int y
-	int width
-	int height
-	CODE:
-		XDrawRectangle(X_disp, *X_win, *X_gc, x, y, width, height);
-		XFlush(X_disp);
-
 # draw a arc in a window
 
 void
@@ -217,20 +155,6 @@ _XDrawArc(X_disp, X_win, X_gc, x, y, width, height, angle1, angle2)
 	int angle2
 	CODE:
 		XDrawArc(X_disp, *X_win, *X_gc, x, y, width, height, angle1, angle2);
-		XFlush(X_disp);
-		
-# draw a string in a window
-
-void
-_XDrawString(X_disp, X_win, X_gc, x, y, text)
-	Display *X_disp
-	Window *X_win
-	GC *X_gc
-	int x
-	int y
-	char *text
-	CODE:
-		XDrawString(X_disp, *X_win, *X_gc, x, y, text, strlen(text));
 		XFlush(X_disp);
 
 # draw a line in a window
@@ -248,67 +172,56 @@ _XDrawLine(X_disp, X_win, X_gc, x1, y1, x2, y2)
 		XDrawLine(X_disp, *X_win, *X_gc, x1, y1, x2, y2);
 		XFlush(X_disp);
 
-# resize a window
+# draw a rectangle in a window
 
 void
-_XResizeWindow(X_disp, X_win, w, h)
+_XDrawRectangle(X_disp, X_win, X_gc, x, y, width, height)
+	Display *X_disp
+	Window *X_win;
+	GC *X_gc;
+	int x
+	int y
+	int width
+	int height
+	CODE:
+		XDrawRectangle(X_disp, *X_win, *X_gc, x, y, width, height);
+		XFlush(X_disp);
+		
+# draw a string in a window
+
+void
+_XDrawString(X_disp, X_win, X_gc, x, y, text)
 	Display *X_disp
 	Window *X_win
-	int w
-	int h
+	GC *X_gc
+	int x
+	int y
+	char *text
 	CODE:
+		XDrawString(X_disp, *X_win, *X_gc, x, y, text, strlen(text));
+		XFlush(X_disp);
+
+# free a GC
+
+void
+_XFreeGC(X_gc)
+	GC *X_gc
+	CODE:
+		free(X_gc);
+
+# get the GC of a window
+
+GC *
+_XGetGC(X_disp, X_win)
+	Display *X_disp
+	Window *X_win
+	CODE:
+		GC *X_gc;
 		XGCValues values;
-		XWindowAttributes win_attr;
 
-		XGetWindowAttributes(X_disp, *X_win, &win_attr);
-		if(win_attr.width < w){
-			if(win_attr.height < h){
-				XResizeWindow(X_disp, *X_win, w, h);
-				win_attr.height = h;
-			} else {
-				XResizeWindow(X_disp, *X_win, w, win_attr.height);
-			}
-		}
-		if(win_attr.height < h){
-			XResizeWindow(X_disp, *X_win, win_attr.width, h);
-		}
-		XFlush(X_disp);
-
-# clear a window
-
-void
-_XClearWindow(X_disp, X_win)
-	Display *X_disp
-	Window *X_win
-	CODE:
-		XClearWindow(X_disp, *X_win);
-		XFlush(X_disp);
-
-# block until we get a button release event, return event coordinates
-# FIXME : lame hack to pass back x & y position. I'm pretty sure that 
-#    I can return these directly, i.e. ($x, $y) = _X11GetMouse($win)
-#    but _XGetMouse(wn, OUTLIST int x, OUTLIST int y) seems to
-#    require me to pass in 3 parameters...
-
-char *
-_XGetMouse(X_disp, X_win)
-	Display *X_disp
-	Window *X_win
-	CODE:
-		char temp[40];
-		XEvent aEvent;
-		Cursor cursor;
-		
-		cursor = XCreateFontCursor(X_disp, XC_crosshair);
-		XDefineCursor(X_disp, *X_win, cursor);
-		XSelectInput(X_disp, *X_win, ButtonReleaseMask);
-		XMaskEvent(X_disp, ButtonReleaseMask, &aEvent);
-		sprintf(temp, "%d %d", aEvent.xbutton.x, aEvent.xbutton.y);
-		XSelectInput(X_disp, *X_win, SubstructureNotifyMask);
-		XUndefineCursor(X_disp, *X_win);
-		XFlush(X_disp);
-		
-		RETVAL = temp;
+		X_gc = (GC *) malloc (sizeof(GC));
+		*X_gc = XCreateGC(X_disp, *X_win, 0, &values);
+		RETVAL = X_gc;
 	OUTPUT:
 		RETVAL
 
@@ -338,6 +251,52 @@ _XGetFont(X_disp, search, suppress)
 	OUTPUT:
 		RETVAL
 
+# block until we get a button release event, return event coordinates
+# includes some error handling in case the user closes the window in 
+# the process of clicking on it
+# FIXME : lame hack to pass back x & y position. I'm pretty sure that 
+#    I can return these directly, i.e. ($x, $y) = _X11GetMouse($win)
+#    but _XGetMouse(wn, OUTLIST int x, OUTLIST int y) seems to
+#    require me to pass in 3 parameters...
+
+char *
+_XGetMouse(X_disp, X_win)
+	Display *X_disp
+	Window *X_win
+	CODE:
+		char temp[40];
+		XEvent aEvent;
+		Cursor cursor;
+		
+		cursor = XCreateFontCursor(X_disp, XC_crosshair);
+		XDefineCursor(X_disp, *X_win, cursor);
+		XSelectInput(X_disp, *X_win, ButtonReleaseMask);
+
+		if(setjmp(XIOrecover) == 0) XSetIOErrorHandler(IOErrorHandler);
+		if(broken_pipe){
+			sprintf(temp, "0.0 0.0");
+		} else {
+			XMaskEvent(X_disp, ButtonReleaseMask, &aEvent);
+			sprintf(temp, "%d %d", aEvent.xbutton.x, aEvent.xbutton.y);
+			XSelectInput(X_disp, *X_win, SubstructureNotifyMask);
+			XUndefineCursor(X_disp, *X_win);
+			XFlush(X_disp);
+		}
+		RETVAL = temp;
+	OUTPUT:
+		RETVAL
+
+# change the line style
+
+void
+_XLineStyle(X_disp, X_gc, line_wd, line_s)
+	Display *X_disp
+	GC *X_gc
+	int line_wd
+	int line_s
+	CODE:
+		XSetLineAttributes(X_disp, *X_gc, line_wd, line_s, CapButt, JoinMiter);
+
 # load a font into the current GC
 
 void
@@ -346,35 +305,133 @@ _XLoadFont(X_disp, X_gc, font_name)
 	GC *X_gc
 	char *font_name
 	CODE:
-		Font the_font;
+		XFontStruct *the_font;
 		
-		the_font = XLoadFont(X_disp, font_name);
-		XSetFont(X_disp, *X_gc, the_font);
+		the_font = XLoadQueryFont(X_disp, font_name);
+		if(the_font != NULL){
+			XSetFont(X_disp, *X_gc, the_font->fid);
+		} else {
+			printf(" font not found\n");
+		}
+		free(the_font);
 
-# check whether the window has been "externally" destroyed
-# done by polling X for some information & seeing if this
-# generates a broken pipe
+# open a new display (one per window)
 
-int
-_XCheck(X_disp, X_win)
+Display *
+_XNewDisplay()
+	CODE:
+		int screen;
+		Display *X_disp;
+		
+		X_disp = XOpenDisplay(NULL);
+		if(X_disp != NULL){
+			screen = DefaultScreen(X_disp);
+			root_window = RootWindow(X_disp, screen);
+		}
+		RETVAL = X_disp;
+	OUTPUT:
+		RETVAL
+
+# open an X window of specified size & background
+
+Window *
+_XNewWindow(X_disp, sx, sy, bg)
+	Display *X_disp
+	int sx
+	int	sy
+	unsigned long bg
+	CODE:
+		Window *X_win;
+		
+		X_win = (Window *) malloc (sizeof(Window));
+		*X_win = XCreateSimpleWindow(X_disp, root_window, 0, 0, sx, sy, 1, 0, bg);
+		XMapWindow(X_disp, *X_win);
+		XFlush(X_disp);
+		RETVAL = X_win;
+	OUTPUT:
+		RETVAL
+
+# resize a window
+
+void
+_XResizeWindow(X_disp, X_win, w, h)
+	Display *X_disp
+	Window *X_win
+	int w
+	int h
+	CODE:
+		XResizeWindow(X_disp, *X_win, w, h);
+		XFlush(X_disp);
+
+# change the foreground color
+
+void
+_XSetForeground(X_disp, X_gc, color)
+	Display *X_disp
+	GC *X_gc
+	int color
+	CODE:
+		XSetForeground(X_disp, *X_gc, color);
+
+# set the window title
+
+void
+_XSetWindowName(X_disp, X_win, name)
+	Display *X_disp
+	Window *X_win
+	char *name
+	CODE:
+		char **stringList;
+		XTextProperty text_prop;
+		
+		stringList = (char **) malloc(sizeof(char *));
+		stringList[0] = name;
+		XStringListToTextProperty(stringList, 1, &text_prop);
+		XSetWMName(X_disp, *X_win, &text_prop);
+		XFlush(X_disp);
+		free(stringList);
+
+# returns the width of a character in the current font
+# I guess they all have the same height since there is no
+# XTextHeight or equivalent ;)
+
+int 
+_XTextWidth(X_disp, font_name, the_text, count)
+	Display *X_disp
+	char *font_name
+	char *the_text
+	int count
+	CODE:
+		int width;
+		XFontStruct *the_font;
+		
+		the_font = XLoadQueryFont(X_disp, font_name);
+		width = XTextWidth(the_font, the_text, count); 		RETVAL = width;
+	OUTPUT:
+		RETVAL
+     
+# get the current window size & the maximum window size in X and Y
+
+char *
+_XWinSize(X_disp, X_win)
 	Display *X_disp
 	Window *X_win
 	CODE:
-		int is_broken;
-		XWindowAttributes win_attr;
-
-		is_broken = 0;
-		broken_pipe = 0;
-		if(setjmp(XIOrecover) == 0) XSetIOErrorHandler(IOErrorHandler);
-		if(broken_pipe){
-			is_broken = 1;
-		} else {
-			XGetWindowAttributes(X_disp, *X_win, &win_attr);
-		}
-		RETVAL = is_broken;
+		int screen;
+		int dw;
+		int dh;
+		char temp[80];
+     	XWindowAttributes win_attr;
+     	
+		screen = DefaultScreen(X_disp);
+		dw = DisplayWidth(X_disp, screen);
+		dh = DisplayHeight(X_disp, screen);
+		XGetWindowAttributes(X_disp, *X_win, &win_attr);
+		sprintf(temp, "%d %d %d %d", win_attr.width, win_attr.height, dw, dh);		
+		RETVAL = temp;
 	OUTPUT:
 		RETVAL
-				
+		
 EOC
 
 ###
@@ -489,6 +546,7 @@ sub _createGrayScale {
 sub _setupFont {
 	my $X_disp = shift;
 	my $font_family = shift;
+
 	my $search_string = "-*-" . $font_family . "-medium-r-normal-*-0-0-*-*-*-0-*-*";
 	my $x_font = _XGetFont($X_disp, $search_string, 1);
 	unless($x_font =~ /not_found/){
@@ -532,13 +590,11 @@ sub new {
 	my %wopt = %default_options;
 	if(defined($opt)){ _parseOptions($opt, \%wopt); }
 	my $X_disp = _XNewDisplay();
-	my $is_good = 1;
-	unless($sig_pipe_initialized){
-		_InitSigPipe();
-		$sig_pipe_initialized = 1;
-	}
-#	if($number_of_X_objects == 0){ $is_good = _XInitialize(); }
-	if($is_good){
+	if(_DisplayPtrCheck($X_disp)){
+		unless($sig_pipe_initialized){
+			_InitSigPipe();
+			$sig_pipe_initialized = 1;
+		}
 		my $X_win = _XNewWindow($X_disp, $wopt{"SIZE_X"}, $wopt{"SIZE_Y"}, _RGBToLong($wopt{"BACK_COLOR"}));
 		my $X_gc = _XGetGC($X_disp, $X_win);
 		_XSetWindowName($X_disp, $X_win, $wopt{"WIN_TITLE"} . " (" . $number_of_X_objects . ")");
@@ -549,7 +605,7 @@ sub new {
 		my $param = {X_disp => $X_disp, X_win => $X_win, X_gc => $X_gc, bad_win => $bad_win, c_table => $c_table, options => \%wopt};
 		return(bless $param, $self);
 	} else {
-		print "X initialize failed\n";
+		print "PDL::Graphics::X X11 display initialization failed\n";
 		return undef;
 	}
 }
@@ -558,12 +614,41 @@ sub new {
 
 sub we_exist {
 	my $self = shift;
-	print "checking existence\n";
 	if(_lost_connection($self)) {
-		print "we don't exist\n";
+		return 1;
 	} else {
-		print "we do exist\n";
 	}
+	return 0;
+}
+
+# returns the maximum allowable size of a window
+# primarily intended for use by modules that build on this module
+
+sub winsize {
+	my $self = shift;
+
+	if(_lost_connection($self)) { return; }
+
+	my $size;
+	$size = _XWinSize($self->{X_disp}, $self->{X_win});
+	my ($size_x, $size_y, $max_x, $max_y) = split(/ /, $size);
+	return ($size_x, $size_y, $max_x, $max_y);
+}
+
+# resizes the window, returns whatever the final size actually 
+# ended up being, primarily intended for internal/other module use
+
+sub resize {
+	my $self = shift;
+	my ($size_x, $size_y) = @_;
+	
+	if(_lost_connection($self)) { return; }
+
+	my ($max_x, $max_y) = (winsize($self))[2,3];
+	if($size_x > $max_x) { $size_x = $max_x; }
+	if($size_y > $max_y) { $size_y = $max_y; }
+	_XResizeWindow($self->{X_disp}, $self->{X_win}, $size_x, $size_y);
+	return($size_x, $size_y);
 }
 
 # catch object destroy so that we can close the X window & free up the associated memory
@@ -595,7 +680,7 @@ sub imag {
 		MAX => 255.0,
 	);
 	
-	if(_lost_connection($self)) { return; }
+	if(_lost_connection($self)) { return 1; }
 	
 	my $num_dims;
 	my @bmp_dims;
@@ -612,19 +697,36 @@ sub imag {
 		return 0;
 	}
 
+	# round requested x and y position to the nearest pixel
+
+	$dopt{"DEST_X"} = rint($dopt{"DEST_X"});
+	$dopt{"DEST_Y"} = rint($dopt{"DEST_Y"});
+
 	# if the user didn't provide the width and height of the part that they want to show, default to showing the whole thing
-		
+
 	if ($dopt{"DEST_W"} == -1) {
 		$dopt{"DEST_W"} = $bmp_dims[0];
-		$dopt{"DEST_W"} = $bmp_dims[1];
 	}
 	if ($dopt{"DEST_H"} == -1) {
-		$dopt{"DEST_H"} = $bmp_dims[0];
 		$dopt{"DEST_H"} = $bmp_dims[1];
 	}
 	
-	# trim the pdl to the desired size
+	# get the window size and set the pdl size to fit
+
+	my ($win_x, $win_y) = (winsize($self))[0,1];
+	if(($dopt{"DEST_X"} > $win_x)||($dopt{"DEST_Y"} > $win_y)){
+		print "$warning message requested x & y offset are outside the window\n";
+		return 0;
+	}
+	if(($dopt{"DEST_X"} + $dopt{"DEST_W"}) > $win_x){
+		$dopt{"DEST_W"} = $win_x - $dopt{"DEST_X"};
+	}
+	if(($dopt{"DEST_Y"} + $dopt{"DEST_H"}) > $win_y){
+		$dopt{"DEST_H"} = $win_y - $dopt{"DEST_Y"};
+	}
 	
+	# trim the pdl to the desired size
+
 	if($num_dims == 2){
 		my $dw = $dopt{"DEST_W"} - 1;
 		my $dh = $dopt{"DEST_H"} - 1;
@@ -636,14 +738,14 @@ sub imag {
 	}
 
 	# check whether the user wants to auto-scale the image
-	
+
 	if ($dopt{"AUTO_SCALE"}){
 		$dopt{"MIN"} = min($the_bitmap);
 		$dopt{"MAX"} = max($the_bitmap);
 	}
 	
 	# re-scale the image if necessary
-	
+
 	if (($dopt{"MIN"} != 0.0) || ($dopt{"MAX"} != 255.0)){
 		if($debug_on){
 			print "$debug_message re-scaling image " . $dopt{"MIN"} . " - " . $dopt{"MAX"} . "\n";
@@ -657,7 +759,7 @@ sub imag {
 	}
 	
 	# threshold the image so that it doesn't roll over
-	
+
 	$the_bitmap = $the_bitmap * ($the_bitmap >= 0.0);
 	$the_bitmap -= 255.0;
 	$the_bitmap = $the_bitmap * ($the_bitmap <= 0.0);
@@ -674,14 +776,12 @@ sub imag {
 		$temp += $the_bitmap->slice(":,:,2");
 		$the_bitmap = $temp->squeeze();
 	}
-			
-	# resize the window, if necessary to accomodate the bitmap
-		
-	_XResizeWindow($self->{X_disp}, $self->{X_win}, $dopt{"DEST_W"} + $dopt{"DEST_X"}, $dopt{"DEST_H"} + $dopt{"DEST_Y"});
 
 	# display the image
 
 	_XDrawBitmap($the_bitmap, $dopt{"DEST_X"}, $dopt{"DEST_Y"}, $self->{X_disp}, $self->{X_win}, $self->{X_gc});
+	
+	return 0;
 }
 
 # Makes a local copy of a user supplied color table. It is assumed that the color 
@@ -712,7 +812,7 @@ sub line {
 	my $self = shift;
 	my ($x, $y, $options) = @_;
 		
-	if(_lost_connection($self)) { return; }
+	if(_lost_connection($self)) { return 1; }
 
 	if (defined($y)) {
 		if (defined($options)){ _parseOptions($options, $self->{options}); }
@@ -722,46 +822,57 @@ sub line {
 	}
 	if($x->dim(0) != $y->dim(0)){
 		print "x & y are not of the same size\n";
-		return;
+		return 0;
 	}
 	_XLineStyle($self->{X_disp}, $self->{X_gc}, $self->{options}->{"LINEWIDTH"}, $self->{options}->{"LINESTYLE"});
 	_XSetForeground($self->{X_disp}, $self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
 	_XPolyLine($x, $y, $self->{X_disp}, $self->{X_win}, $self->{X_gc});
+	return 0;
 }
 
 # erases the window
 
 sub erase {
 	my $self = shift;
-	if(_lost_connection($self)) { return; }
+	if(_lost_connection($self)) { return 1; }
 	_XClearWindow($self->{X_disp}, $self->{X_win});
+	return 0;
 }
 
 # draws text onto the window
 
 sub text {
 	my $self = shift;
-	my ($text, $x, $y, $options) = @_;
+	my ($text, $x, $y, $angle, $options) = @_;
 
-	if(_lost_connection($self)) { return; }
+	if(_lost_connection($self)) { return 1; }
 	
 	my $old_name = $self->{options}->{"FONT_NAME"};
-	if(defined($y)) {
+	if(defined($angle)) {
 		if (defined($options)){ _parseOptions($options, $self->{options}); }
 	} else {
-		print "$warning_message you must specify : text, x, y for text\n";
+		print "$warning_message you must specify : text, x, y, angle for text\n";
 		return 0;
 	}
 	unless($old_name eq $self->{options}->{"FONT_NAME"}){
 		$self->{options}->{"X_FONT"} = _setupFont($self->{X_disp}, $self->{options}->{"FONT_NAME"});
 	}
+	my $font_name = $self->{options}->{"X_FONT"};
 	unless($self->{options}->{"X_FONT"} eq "not_found"){
-		my $font_name = $self->{options}->{"X_FONT"};
 		$font_name =~ s!--\*!--$self->{options}->{"CHARSIZE"}!;
 		_XLoadFont($self->{X_disp}, $self->{X_gc}, $font_name);
 	}
 	_XSetForeground($self->{X_disp}, $self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
-	_XDrawString($self->{X_disp}, $self->{X_win}, $self->{X_gc}, $x, $y, $text);
+
+	my $dy = -sin($angle * 3.14159/180.0) * ($self->{options}->{"CHARSIZE"} - 1);
+	for my $i (0..(length($text)-1)){
+		my $char = substr($text, $i, 1);
+		my $dx = cos($angle * 3.14159/180.0) * (_XTextWidth($self->{X_disp}, $font_name, $char, 1) + 1);
+		_XDrawString($self->{X_disp}, $self->{X_win}, $self->{X_gc}, $x, $y, $char);
+		$x += $dx;
+		$y += $dy;
+	}
+	return 0;
 }
 
 # returns coordinates of mouse click in the window
@@ -783,7 +894,7 @@ sub rect {
 	my $self = shift;
 	my ($x1, $y1, $x2, $y2, $options) = @_;
 
-	if(_lost_connection($self)) { return; }
+	if(_lost_connection($self)) { return 1; }
 
 	if(defined($y2)) {
 		if (defined($options)){ _parseOptions($options, $self->{options}); }
@@ -795,6 +906,7 @@ sub rect {
 	_XLineStyle($self->{X_disp}, $self->{X_gc}, $self->{options}->{"LINEWIDTH"}, $self->{options}->{"LINESTYLE"});
 	_XSetForeground($self->{X_disp}, $self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
 	_XDrawRectangle($self->{X_disp}, $self->{X_win}, $self->{X_gc}, $x1, $y1, ($x2-$x1), ($y2-$y1));
+	return 0;
 }
 
 # draw a circle
@@ -803,7 +915,7 @@ sub circle {
 	my $self = shift;
 	my ($x, $y, $r, $options) = @_;
 
-	if(_lost_connection($self)) { return; }
+	if(_lost_connection($self)) { return 1; }
 
 	if(defined($r)) {
 		if (defined($options)){ _parseOptions($options, $self->{options}); }
@@ -815,6 +927,7 @@ sub circle {
 	_XLineStyle($self->{X_disp}, $self->{X_gc}, $self->{options}->{"LINEWIDTH"}, $self->{options}->{"LINESTYLE"});
 	_XSetForeground($self->{X_disp}, $self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
 	_XDrawArc($self->{X_disp}, $self->{X_win}, $self->{X_gc}, ($x-$r), ($y-$r), 2*$r, 2*$r, 0, 360*64);
+	return 0;
 }
 
 # draw an ellipse
@@ -823,7 +936,7 @@ sub ellipse {
 	my $self = shift;
 	my ($x, $y, $a, $b, $options) = @_;
 
-	if(_lost_connection($self)) { return; }
+	if(_lost_connection($self)) { return 1; }
 
 	if(defined($b)) {
 		if (defined($options)){ _parseOptions($options, $self->{options}); }
@@ -835,6 +948,7 @@ sub ellipse {
 	_XLineStyle($self->{X_disp}, $self->{X_gc}, $self->{options}->{"LINEWIDTH"}, $self->{options}->{"LINESTYLE"});
 	_XSetForeground($self->{X_disp}, $self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
 	_XDrawArc($self->{X_disp}, $self->{X_win}, $self->{X_gc}, ($x-$a/2), ($y-$b/2), $a, $b, 0, 360*64);
+	return 0;
 }
 
 EOD
@@ -1030,9 +1144,9 @@ Draw text
 
 =for usage
 
-  Usage: $win1->text("hello", 10, 20);
+  Usage: $win1->text("hello", $x, $y, $angle);
 
-Draws text. How fonts are currently dealt with is imperfect at best. So that the font size can easily be changed, a search is performed for a scalable font with specified font name. If such a font cannot be found then the text will be displayed with the default X font and no font scaling.
+Draws text starting at $x and $y with baseline angle given by $angle. If you know how to draw truly rotated text in X, please let me know. How fonts are currently dealt with is imperfect at best. So that the font size can easily be changed, a search is performed for a scalable font with specified font name. If such a font cannot be found then the text will be displayed with the default X font and no font scaling.
 
 Options recognized
 
@@ -1052,11 +1166,47 @@ Returns the location of next mouse click in the window
 
 Returns the x & y locations of the next mouse click in the window.
 
+=head2 we_exist
+
+=for ref
+
+Returns 0 if the window still exists, 1 if it does not
+
+=for usage
+
+  Usage : my $exists = $win1->we_exist();
+
+Originally written to help debug some problems with associated with X windows being closed by the user with a mouse. Preserved on the off chance that it will be useful to a dependent module.
+
+=head2 winsize
+
+=for ref
+
+Returns the window size & maximum window size (in pixels) in x and y
+
+=for usage
+
+  Usage : my ($win_x, $win_y, $max_x, $max_y) = $win1->winsize();
+
+Primarily intended for use by dependent modules that might want to know what the current and maximum window size is.
+
+=head2 resize
+
+=for ref
+
+resizes a window & returns the new size (which might not be what you requested)
+
+=for usage
+
+  Usage : my ($new_x, $new_y) = $win1->resize($size_x, $size_y);
+
+Primarily intended for use by dependent modules that might want to resize a window without destroying it and creating another one.
+
 =head1 KNOWN ISSUES
 
 In order to keep from crashing hard when an X window is closed by the mouse, this module has its own SIGPIPE error handler. Hopefully this will not conflict with possibly similar error handlers created by other modules.
 
-Font handling is poorly implemented, again suggestions on a better approach are welcomed.
+Font handling is poorly implemented as is rotated text.
 
 Depending on the context RGB triples do not always give you the color you might have desired. They seem to work fine in the context of bitmaps, but more poorly in the context of line & text coloring.
 
