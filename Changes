@@ -18,4 +18,14 @@ Revision history for Perl extension PDL::Graphics::X.
 		 rect
 		 circle
 		 ellipse
-		   
+		 
+0.03  Mon Feb 28 2005
+        Figured out how to make X close only one window (rather 
+           then all the windows) when you clicked the close box with
+           the mouse.
+        Figured out how to trap broken pipe errors caused by severing
+           X client/server connections.
+      
+      Sat Mar 5 2005
+      	Implemented broken pipe handling caused by breaking X client/
+      	   server connections

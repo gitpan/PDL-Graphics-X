@@ -1,4 +1,4 @@
-$VERSION = '0.02';
+$VERSION = '0.03';
 
 pp_bless('PDL::Graphics::X');
 
@@ -9,12 +9,8 @@ pp_bless('PDL::Graphics::X');
 # The approach is that each X object will have an associated X window. The 
 # X object stores the X window and the associated GC. The object is responsible 
 # for creating & destroying the window, for relaying commands between perl 
-# and the window & (eventually...) making sure that the window has not been 
-# destroyed in some other way (i.e. the user closed the window directly w/ the mouse).
-#
-# Since this is module is still being developed it is a little messy with 
-# extra code, etc... Mostly (desparate) attempts to figure out how to catch Bad
-# Windows.
+# and the window & making sure that the window has not been destroyed in some 
+# other way (i.e. the user closed the window directly w/ the mouse).
 #
 # Not the best convention perhaps, but routines that I wrote that call X
 # start with '_X' and "real" X routines start with 'X'.
@@ -37,22 +33,28 @@ pp_addhdr('
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/cursorfont.h>
+#include <signal.h>
+#include <setjmp.h>
+jmp_buf XIOrecover;
 
-static int screen;
-static Display *display;
 static Window root_window;
+static int broken_pipe;
 
 /*
- * sub-routines
+ *
  */
+ 
+int IOErrorHandler (Display *dpy) {
+	printf("Warning, window is already closed\n");
+	longjmp(XIOrecover, 1);
+	printf("jump failed...\n");
+}
 
-/* error handler */
-/*
-int myErrorHandler(Display* display, XErrorEvent* event){
-	printf("error\n");
-	printf("%d %c %c %c\n", event->serial, event->error_code, event->request_code, event->minor_code);
-    return 0;}	
-*/
+void sig_pipe(int n){
+	printf("Caught broken pipe\n");
+	broken_pipe = 1;
+}
+
 ');
 
 ###
@@ -61,33 +63,35 @@ int myErrorHandler(Display* display, XErrorEvent* event){
 
 pp_addxs(<<'EOC');
 
-# initialize X
+# set-up broken pipe error handler
 
-int
-_XInitialize()
+void
+_InitSigPipe()
 	CODE:
-		int is_good;
-
-		is_good = 0;
-		display = XOpenDisplay(NULL);
-		if(display == NULL){
-			printf("PDL::Graphics::X : Attempt to initialize X failed\n");
-		} else {
-			is_good = 1;
-			screen = DefaultScreen(display);
-			root_window = RootWindow(display,screen);
-
-#			XSetErrorHandler(myErrorHandler);
-#			XSynchronize(display, TRUE); 
+		if (signal(SIGPIPE, sig_pipe) == SIG_ERR) {
+			printf("Unable to set up signal handler, beware X!\n");
 		}
-		RETVAL = is_good;
+
+# open a new display (one per window)
+
+Display *
+_XNewDisplay()
+	CODE:
+		int screen;
+		Display *X_disp;
+		
+		X_disp = XOpenDisplay(NULL);
+		screen = DefaultScreen(X_disp);
+		root_window = RootWindow(X_disp,screen);
+		RETVAL = X_disp;
 	OUTPUT:
 		RETVAL
 
 # open an X window of specified size & background
 
 Window *
-_XNewWindow(sx, sy, bg)
+_XNewWindow(X_disp, sx, sy, bg)
+	Display *X_disp
 	int sx
 	int	sy
 	unsigned long bg
@@ -95,10 +99,9 @@ _XNewWindow(sx, sy, bg)
 		Window *X_win;
 		
 		X_win = (Window *) malloc (sizeof(Window));
-		*X_win = XCreateSimpleWindow(display, root_window, 0, 0, sx, sy, 1, 0, bg);
-		XMapWindow(display, *X_win);
-		XFlush(display);
-		XSelectInput(display, *X_win, SubstructureNotifyMask);
+		*X_win = XCreateSimpleWindow(X_disp, root_window, 0, 0, sx, sy, 1, 0, bg);
+		XMapWindow(X_disp, *X_win);
+		XFlush(X_disp);
 		RETVAL = X_win;
 	OUTPUT:
 		RETVAL
@@ -106,14 +109,15 @@ _XNewWindow(sx, sy, bg)
 # get the GC of a window
 
 GC *
-_XGetGC(X_win)
+_XGetGC(X_disp, X_win)
+	Display *X_disp
 	Window *X_win
 	CODE:
 		GC *X_gc;
 		XGCValues values;
 
 		X_gc = (GC *) malloc (sizeof(GC));
-		*X_gc = XCreateGC(display, *X_win, 0, &values);
+		*X_gc = XCreateGC(X_disp, *X_win, 0, &values);
 		RETVAL = X_gc;
 	OUTPUT:
 		RETVAL
@@ -121,7 +125,8 @@ _XGetGC(X_win)
 # set the window title
 
 void
-_XSetWindowName(X_win, name)
+_XSetWindowName(X_disp, X_win, name)
+	Display *X_disp
 	Window *X_win
 	char *name
 	CODE:
@@ -131,17 +136,18 @@ _XSetWindowName(X_win, name)
 		stringList = (char **) malloc(sizeof(char *));
 		stringList[0] = name;
 		XStringListToTextProperty(stringList, 1, &text_prop);
-		XSetWMName(display, *X_win, &text_prop);
-		XFlush(display);
+		XSetWMName(X_disp, *X_win, &text_prop);
+		XFlush(X_disp);
 		free(stringList);
 		# close a window & free storage
 
 void
-_XCloseWindow(X_win)
+_XCloseWindow(X_disp, X_win)
+	Display *X_disp
 	Window *X_win
 	CODE:
-		XDestroyWindow(display, *X_win);
-		XFlush(display);
+		XDestroyWindow(X_disp, *X_win);
+		XFlush(X_disp);
 		free(X_win);
 
 # free a GC
@@ -155,33 +161,37 @@ _XFreeGC(X_gc)
 # close the display
 
 void
-_XCloseDisplay()
+_XCloseDisplay(X_disp)
+	Display *X_disp
 	CODE:
-		XCloseDisplay(display);
+		XCloseDisplay(X_disp);
 
 # change the foreground color
 
 void
-_XSetForeground(X_gc, color)
+_XSetForeground(X_disp, X_gc, color)
+	Display *X_disp
 	GC *X_gc
 	int color
 	CODE:
-		XSetForeground(display, *X_gc, color);
+		XSetForeground(X_disp, *X_gc, color);
 
 # change the line style
 
 void
-_XLineStyle(X_gc, line_wd, line_s)
+_XLineStyle(X_disp, X_gc, line_wd, line_s)
+	Display *X_disp
 	GC *X_gc
 	int line_wd
 	int line_s
 	CODE:
-		XSetLineAttributes(display, *X_gc, line_wd, line_s, CapButt, JoinMiter);
+		XSetLineAttributes(X_disp, *X_gc, line_wd, line_s, CapButt, JoinMiter);
 
 # draw a rectangle in a window
 
 void
-_XDrawRectangle(X_win, X_gc, x, y, width, height)
+_XDrawRectangle(X_disp, X_win, X_gc, x, y, width, height)
+	Display *X_disp
 	Window *X_win;
 	GC *X_gc;
 	int x
@@ -189,13 +199,14 @@ _XDrawRectangle(X_win, X_gc, x, y, width, height)
 	int width
 	int height
 	CODE:
-		XDrawRectangle(display, *X_win, *X_gc, x, y, width, height);
-		XFlush(display);
+		XDrawRectangle(X_disp, *X_win, *X_gc, x, y, width, height);
+		XFlush(X_disp);
 
 # draw a arc in a window
 
 void
-_XDrawArc(X_win, X_gc, x, y, width, height, angle1, angle2)
+_XDrawArc(X_disp, X_win, X_gc, x, y, width, height, angle1, angle2)
+	Display *X_disp
 	Window *X_win
 	GC *X_gc
 	int x
@@ -205,26 +216,28 @@ _XDrawArc(X_win, X_gc, x, y, width, height, angle1, angle2)
 	int angle1
 	int angle2
 	CODE:
-		XDrawArc(display, *X_win, *X_gc, x, y, width, height, angle1, angle2);
-		XFlush(display);
+		XDrawArc(X_disp, *X_win, *X_gc, x, y, width, height, angle1, angle2);
+		XFlush(X_disp);
 		
 # draw a string in a window
 
 void
-_XDrawString(X_win, X_gc, x, y, text)
+_XDrawString(X_disp, X_win, X_gc, x, y, text)
+	Display *X_disp
 	Window *X_win
 	GC *X_gc
 	int x
 	int y
 	char *text
 	CODE:
-		XDrawString(display, *X_win, *X_gc, x, y, text, strlen(text));
-		XFlush(display);
+		XDrawString(X_disp, *X_win, *X_gc, x, y, text, strlen(text));
+		XFlush(X_disp);
 
 # draw a line in a window
 
 void
-_XDrawLine(X_win, X_gc, x1, y1, x2, y2)
+_XDrawLine(X_disp, X_win, X_gc, x1, y1, x2, y2)
+	Display *X_disp
 	Window *X_win
 	GC *X_gc
 	int x1
@@ -232,13 +245,14 @@ _XDrawLine(X_win, X_gc, x1, y1, x2, y2)
 	int x2
 	int y2
 	CODE:
-		XDrawLine(display, *X_win, *X_gc, x1, y1, x2, y2);
-		XFlush(display);
+		XDrawLine(X_disp, *X_win, *X_gc, x1, y1, x2, y2);
+		XFlush(X_disp);
 
 # resize a window
 
 void
-_XResizeWindow(X_win, w, h)
+_XResizeWindow(X_disp, X_win, w, h)
+	Display *X_disp
 	Window *X_win
 	int w
 	int h
@@ -246,28 +260,29 @@ _XResizeWindow(X_win, w, h)
 		XGCValues values;
 		XWindowAttributes win_attr;
 
-		XGetWindowAttributes(display, *X_win, &win_attr);
+		XGetWindowAttributes(X_disp, *X_win, &win_attr);
 		if(win_attr.width < w){
 			if(win_attr.height < h){
-				XResizeWindow(display, *X_win, w, h);
+				XResizeWindow(X_disp, *X_win, w, h);
 				win_attr.height = h;
 			} else {
-				XResizeWindow(display, *X_win, w, win_attr.height);
+				XResizeWindow(X_disp, *X_win, w, win_attr.height);
 			}
 		}
 		if(win_attr.height < h){
-			XResizeWindow(display, *X_win, win_attr.width, h);
+			XResizeWindow(X_disp, *X_win, win_attr.width, h);
 		}
-		XFlush(display);
+		XFlush(X_disp);
 
 # clear a window
 
 void
-_XClearWindow(X_win)
+_XClearWindow(X_disp, X_win)
+	Display *X_disp
 	Window *X_win
 	CODE:
-		XClearWindow(display, *X_win);
-		XFlush(display);
+		XClearWindow(X_disp, *X_win);
+		XFlush(X_disp);
 
 # block until we get a button release event, return event coordinates
 # FIXME : lame hack to pass back x & y position. I'm pretty sure that 
@@ -276,21 +291,22 @@ _XClearWindow(X_win)
 #    require me to pass in 3 parameters...
 
 char *
-_XGetMouse(X_win)
+_XGetMouse(X_disp, X_win)
+	Display *X_disp
 	Window *X_win
 	CODE:
 		char temp[40];
 		XEvent aEvent;
 		Cursor cursor;
 		
-		cursor = XCreateFontCursor(display, XC_crosshair);
-		XDefineCursor(display, *X_win, cursor);
-		XSelectInput(display, *X_win, ButtonReleaseMask);
-		XMaskEvent(display, ButtonReleaseMask, &aEvent);
+		cursor = XCreateFontCursor(X_disp, XC_crosshair);
+		XDefineCursor(X_disp, *X_win, cursor);
+		XSelectInput(X_disp, *X_win, ButtonReleaseMask);
+		XMaskEvent(X_disp, ButtonReleaseMask, &aEvent);
 		sprintf(temp, "%d %d", aEvent.xbutton.x, aEvent.xbutton.y);
-		XSelectInput(display, *X_win, SubstructureNotifyMask);
-		XUndefineCursor(display, *X_win);
-		XFlush(display);
+		XSelectInput(X_disp, *X_win, SubstructureNotifyMask);
+		XUndefineCursor(X_disp, *X_win);
+		XFlush(X_disp);
 		
 		RETVAL = temp;
 	OUTPUT:
@@ -299,7 +315,8 @@ _XGetMouse(X_win)
 # returns the name of the first font found that matches our search pattern
 
 char *
-_XGetFont(search, suppress)
+_XGetFont(X_disp, search, suppress)
+	Display *X_disp
 	char *search
 	int suppress
 	CODE:
@@ -307,7 +324,7 @@ _XGetFont(search, suppress)
 		int count;
 		char **list;
 
-		list = XListFonts(display, search, 2000, &count);
+		list = XListFonts(X_disp, search, 2000, &count);
 		RETVAL = "not_found";
 		if((suppress == 0)&&(count > 0)){
 			printf("%d fonts available\n", count);
@@ -324,32 +341,40 @@ _XGetFont(search, suppress)
 # load a font into the current GC
 
 void
-_XLoadFont(X_gc, font_name)
+_XLoadFont(X_disp, X_gc, font_name)
+	Display *X_disp
 	GC *X_gc
 	char *font_name
 	CODE:
 		Font the_font;
 		
-		the_font = XLoadFont(display, font_name);
-		XSetFont(display, *X_gc, the_font);
+		the_font = XLoadFont(X_disp, font_name);
+		XSetFont(X_disp, *X_gc, the_font);
 
 # check whether the window has been "externally" destroyed
-# NOTE : this doesn't work... written for debugging
+# done by polling X for some information & seeing if this
+# generates a broken pipe
 
-void
-_XCheck(X_win)
+int
+_XCheck(X_disp, X_win)
+	Display *X_disp
 	Window *X_win
 	CODE:
-		XEvent report;
-		
-		XFlush(display);
-#		while(XCheckWindowEvent(display, *X_win, SubstructureNotifyMask, &report)){
-		printf("checking for events %d\n", display);
-		while(XCheckMaskEvent(display, SubstructureNotifyMask, &report)){
-			printf("event\n");
-			printf("%d %d\n", report.type, ConfigureNotify);
-		}
+		int is_broken;
+		XWindowAttributes win_attr;
 
+		is_broken = 0;
+		broken_pipe = 0;
+		if(setjmp(XIOrecover) == 0) XSetIOErrorHandler(IOErrorHandler);
+		if(broken_pipe){
+			is_broken = 1;
+		} else {
+			XGetWindowAttributes(X_disp, *X_win, &win_attr);
+		}
+		RETVAL = is_broken;
+	OUTPUT:
+		RETVAL
+				
 EOC
 
 ###
@@ -360,37 +385,37 @@ EOC
 
 pp_def('_XPolyLine',
 	Pars => 'x(n); y(n)',
-	OtherPars => 'int X_win; int X_gc',
+	OtherPars => 'int X_disp; int X_win; int X_gc',
 	GenericTypes => [L],
 	Code => '
 		int i,j;
 		
 		for(i=0;i<($SIZE(n)-1);i++){
 			j = i+1;
-			XDrawLine(display, $COMP(X_win), *((GC *)$COMP(X_gc)), $x(n=>i), $y(n=>i), $x(n=>j), $y(n=>j));
+			XDrawLine(((Display *)$COMP(X_disp)), *((Window *)$COMP(X_win)), *((GC *)$COMP(X_gc)), $x(n=>i), $y(n=>i), $x(n=>j), $y(n=>j));
 		}
-		XFlush(display);
+		XFlush((Display *)$COMP(X_disp));
 ');
 
 # draw a bitmap
 
 pp_def('_XDrawBitmap',
 	Pars => 'bm(n,m)',
-	OtherPars => 'int x; int y; int X_win; int X_gc',
+	OtherPars => 'int x; int y; int X_disp; int X_win; int X_gc',
 	GenericTypes => [L],
 	Code => '
 		int i, j;
 		XImage *picture;
 		
-		picture = XGetImage(display, *((Window *)$COMP(X_win)), 0, 0, $SIZE(n), $SIZE(m), AllPlanes, ZPixmap);
+		picture = XGetImage(((Display *)$COMP(X_disp)), *((Window *)$COMP(X_win)), 0, 0, $SIZE(n), $SIZE(m), AllPlanes, ZPixmap);
 		for(i=0;i<$SIZE(n);i++){
 			for(j=0;j<$SIZE(m);j++){
 				XPutPixel(picture, i, j, $bm(n=>i,m=>j));
 			}
 		}
-		XPutImage(display, *((Window *)$COMP(X_win)), *((GC *)$COMP(X_gc)), picture, 0, 0, $COMP(x), $COMP(y), $SIZE(n), $SIZE(m));
+		XPutImage(((Display *)$COMP(X_disp)), *((Window *)$COMP(X_win)), *((GC *)$COMP(X_gc)), picture, 0, 0, $COMP(x), $COMP(y), $SIZE(n), $SIZE(m));
 		XDestroyImage(picture);
-		XFlush(display);
+		XFlush((Display *)$COMP(X_disp));
 ');
 
 ###
@@ -407,6 +432,7 @@ use PDL;
 # Global variables
 ###
 
+my $sig_pipe_initialized = 0;				# flag for whether broken pipe error handling is running
 my $number_of_X_objects = 0;				# keeps track of how many X objects exist
 my $warning_message = ">>> X Warning : "; 	# generic start of warning messages
 
@@ -461,9 +487,10 @@ sub _createGrayScale {
 # the first one that is found is the one that is used
 
 sub _setupFont {
+	my $X_disp = shift;
 	my $font_family = shift;
 	my $search_string = "-*-" . $font_family . "-medium-r-normal-*-0-0-*-*-*-0-*-*";
-	my $x_font = _XGetFont($search_string,1);
+	my $x_font = _XGetFont($X_disp, $search_string, 1);
 	unless($x_font =~ /not_found/){
 		$x_font =~ s!-0!-\*!g;
 	} else {
@@ -471,6 +498,26 @@ sub _setupFont {
 	}
 	return $x_font;
 }
+
+# handles checking whether or not we still have a valid client-server connection
+# and freeing the object is we don't
+
+sub _lost_connection {
+	my $xwin = shift;
+
+	unless($xwin->{bad_win}){	
+		if(_XCheck($xwin->{X_disp}, $xwin->{X_win})){
+			print "The connection to window called \"" . $xwin->{options}->{"WIN_TITLE"} . "\" was lost\n";
+			$xwin->{bad_win} = 1;
+			return 1;
+		} else {
+			return 0;
+		}
+	} else {
+		print "Sorry, the window called \"" . $xwin->{options}->{"WIN_TITLE"} . "\" is closed\n";
+		return 1;
+	}
+}	
 
 ###
 # Object methods
@@ -484,16 +531,22 @@ sub new {
 
 	my %wopt = %default_options;
 	if(defined($opt)){ _parseOptions($opt, \%wopt); }
+	my $X_disp = _XNewDisplay();
 	my $is_good = 1;
-	if($number_of_X_objects == 0){ $is_good = _XInitialize(); }
+	unless($sig_pipe_initialized){
+		_InitSigPipe();
+		$sig_pipe_initialized = 1;
+	}
+#	if($number_of_X_objects == 0){ $is_good = _XInitialize(); }
 	if($is_good){
-		my $X_win = _XNewWindow($wopt{"SIZE_X"}, $wopt{"SIZE_Y"}, _RGBToLong($wopt{"BACK_COLOR"}));
-		my $X_gc = _XGetGC($X_win);
-		_XSetWindowName($X_win, $wopt{"WIN_TITLE"} . " (" . $number_of_X_objects . ")");
+		my $X_win = _XNewWindow($X_disp, $wopt{"SIZE_X"}, $wopt{"SIZE_Y"}, _RGBToLong($wopt{"BACK_COLOR"}));
+		my $X_gc = _XGetGC($X_disp, $X_win);
+		_XSetWindowName($X_disp, $X_win, $wopt{"WIN_TITLE"} . " (" . $number_of_X_objects . ")");
 		my $c_table = _createGrayScale();
-		$wopt{"X_FONT"} = _setupFont($wopt{"FONT_NAME"});
+		$wopt{"X_FONT"} = _setupFont($X_disp, $wopt{"FONT_NAME"});
 		$number_of_X_objects++;
-		my $param = {X_win => $X_win, X_gc => $X_gc, c_table => $c_table, options => \%wopt};
+		my $bad_win = 0;
+		my $param = {X_disp => $X_disp, X_win => $X_win, X_gc => $X_gc, bad_win => $bad_win, c_table => $c_table, options => \%wopt};
 		return(bless $param, $self);
 	} else {
 		print "X initialize failed\n";
@@ -505,19 +558,26 @@ sub new {
 
 sub we_exist {
 	my $self = shift;
-	_XCheck($self->{X_win});
+	print "checking existence\n";
+	if(_lost_connection($self)) {
+		print "we don't exist\n";
+	} else {
+		print "we do exist\n";
+	}
 }
 
 # catch object destroy so that we can close the X window & free up the associated memory
+# if the window is bad, this means that X has already taken care of this for us
 
 sub DESTROY {
 	my $self = shift;
-	_XFreeGC($self->{X_gc});
-	_XCloseWindow($self->{X_win});
-	$number_of_X_objects--;
-	if($number_of_X_objects == 0){
-		_XCloseDisplay();
+	unless($bad_window){
+		_XFreeGC($self->{X_gc});
+		_XCloseWindow($self->{X_disp}, $self->{X_win});
+		_XCloseDisplay($self->{X_disp});
 	}
+	$bad_window = 0;
+	$number_of_X_objects--;
 }
 
 # display a pdl as a 2 dimensional bitmap
@@ -534,6 +594,8 @@ sub imag {
 		MIN => 0.0,
 		MAX => 255.0,
 	);
+	
+	if(_lost_connection($self)) { return; }
 	
 	my $num_dims;
 	my @bmp_dims;
@@ -615,11 +677,11 @@ sub imag {
 			
 	# resize the window, if necessary to accomodate the bitmap
 		
-	_XResizeWindow($self->{X_win}, $dopt{"DEST_W"} + $dopt{"DEST_X"}, $dopt{"DEST_H"} + $dopt{"DEST_Y"});
+	_XResizeWindow($self->{X_disp}, $self->{X_win}, $dopt{"DEST_W"} + $dopt{"DEST_X"}, $dopt{"DEST_H"} + $dopt{"DEST_Y"});
 
 	# display the image
 
-	_XDrawBitmap($the_bitmap, $dopt{"DEST_X"}, $dopt{"DEST_Y"}, $self->{X_win}, $self->{X_gc});
+	_XDrawBitmap($the_bitmap, $dopt{"DEST_X"}, $dopt{"DEST_Y"}, $self->{X_disp}, $self->{X_win}, $self->{X_gc});
 }
 
 # Makes a local copy of a user supplied color table. It is assumed that the color 
@@ -650,6 +712,8 @@ sub line {
 	my $self = shift;
 	my ($x, $y, $options) = @_;
 		
+	if(_lost_connection($self)) { return; }
+
 	if (defined($y)) {
 		if (defined($options)){ _parseOptions($options, $self->{options}); }
 	} else {
@@ -660,16 +724,17 @@ sub line {
 		print "x & y are not of the same size\n";
 		return;
 	}
-	_XLineStyle($self->{X_gc}, $self->{options}->{"LINEWIDTH"}, $self->{options}->{"LINESTYLE"});
-	_XSetForeground($self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
-	_XPolyLine($x, $y, $self->{X_win}, $self->{X_gc});
+	_XLineStyle($self->{X_disp}, $self->{X_gc}, $self->{options}->{"LINEWIDTH"}, $self->{options}->{"LINESTYLE"});
+	_XSetForeground($self->{X_disp}, $self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
+	_XPolyLine($x, $y, $self->{X_disp}, $self->{X_win}, $self->{X_gc});
 }
 
 # erases the window
 
 sub erase {
 	my $self = shift;
-	_XClearWindow($self->{X_win});
+	if(_lost_connection($self)) { return; }
+	_XClearWindow($self->{X_disp}, $self->{X_win});
 }
 
 # draws text onto the window
@@ -677,6 +742,8 @@ sub erase {
 sub text {
 	my $self = shift;
 	my ($text, $x, $y, $options) = @_;
+
+	if(_lost_connection($self)) { return; }
 	
 	my $old_name = $self->{options}->{"FONT_NAME"};
 	if(defined($y)) {
@@ -686,15 +753,15 @@ sub text {
 		return 0;
 	}
 	unless($old_name eq $self->{options}->{"FONT_NAME"}){
-		$self->{options}->{"X_FONT"} = _setupFont($self->{options}->{"FONT_NAME"});
+		$self->{options}->{"X_FONT"} = _setupFont($self->{X_disp}, $self->{options}->{"FONT_NAME"});
 	}
 	unless($self->{options}->{"X_FONT"} eq "not_found"){
 		my $font_name = $self->{options}->{"X_FONT"};
 		$font_name =~ s!--\*!--$self->{options}->{"CHARSIZE"}!;
-		_XLoadFont($self->{X_gc}, $font_name);
+		_XLoadFont($self->{X_disp}, $self->{X_gc}, $font_name);
 	}
-	_XSetForeground($self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
-	_XDrawString($self->{X_win}, $self->{X_gc}, $x, $y, $text);
+	_XSetForeground($self->{X_disp}, $self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
+	_XDrawString($self->{X_disp}, $self->{X_win}, $self->{X_gc}, $x, $y, $text);
 }
 
 # returns coordinates of mouse click in the window
@@ -702,8 +769,10 @@ sub text {
 sub cursor {
 	my $self = shift;
 
+	if(_lost_connection($self)) { return; }
+
 	my $event;
-	$event = _XGetMouse($self->{X_win});
+	$event = _XGetMouse($self->{X_disp}, $self->{X_win});
 	my ($x, $y) = split(/ /, $event);
 	return ($x, $y);
 }
@@ -714,6 +783,8 @@ sub rect {
 	my $self = shift;
 	my ($x1, $y1, $x2, $y2, $options) = @_;
 
+	if(_lost_connection($self)) { return; }
+
 	if(defined($y2)) {
 		if (defined($options)){ _parseOptions($options, $self->{options}); }
 	} else {
@@ -721,9 +792,9 @@ sub rect {
 		return 0;
 	}
 	
-	_XLineStyle($self->{X_gc}, $self->{options}->{"LINEWIDTH"}, $self->{options}->{"LINESTYLE"});
-	_XSetForeground($self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
-	_XDrawRectangle($self->{X_win}, $self->{X_gc}, $x1, $y1, ($x2-$x1), ($y2-$y1));
+	_XLineStyle($self->{X_disp}, $self->{X_gc}, $self->{options}->{"LINEWIDTH"}, $self->{options}->{"LINESTYLE"});
+	_XSetForeground($self->{X_disp}, $self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
+	_XDrawRectangle($self->{X_disp}, $self->{X_win}, $self->{X_gc}, $x1, $y1, ($x2-$x1), ($y2-$y1));
 }
 
 # draw a circle
@@ -732,6 +803,8 @@ sub circle {
 	my $self = shift;
 	my ($x, $y, $r, $options) = @_;
 
+	if(_lost_connection($self)) { return; }
+
 	if(defined($r)) {
 		if (defined($options)){ _parseOptions($options, $self->{options}); }
 	} else {
@@ -739,9 +812,9 @@ sub circle {
 		return 0;
 	}
 	
-	_XLineStyle($self->{X_gc}, $self->{options}->{"LINEWIDTH"}, $self->{options}->{"LINESTYLE"});
-	_XSetForeground($self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
-	_XDrawArc($self->{X_win}, $self->{X_gc}, ($x-$r), ($y-$r), 2*$r, 2*$r, 0, 360*64);
+	_XLineStyle($self->{X_disp}, $self->{X_gc}, $self->{options}->{"LINEWIDTH"}, $self->{options}->{"LINESTYLE"});
+	_XSetForeground($self->{X_disp}, $self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
+	_XDrawArc($self->{X_disp}, $self->{X_win}, $self->{X_gc}, ($x-$r), ($y-$r), 2*$r, 2*$r, 0, 360*64);
 }
 
 # draw an ellipse
@@ -750,6 +823,8 @@ sub ellipse {
 	my $self = shift;
 	my ($x, $y, $a, $b, $options) = @_;
 
+	if(_lost_connection($self)) { return; }
+
 	if(defined($b)) {
 		if (defined($options)){ _parseOptions($options, $self->{options}); }
 	} else {
@@ -757,9 +832,9 @@ sub ellipse {
 		return 0;
 	}
 	
-	_XLineStyle($self->{X_gc}, $self->{options}->{"LINEWIDTH"}, $self->{options}->{"LINESTYLE"});
-	_XSetForeground($self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
-	_XDrawArc($self->{X_win}, $self->{X_gc}, ($x-$a/2), ($y-$b/2), $a, $b, 0, 360*64);
+	_XLineStyle($self->{X_disp}, $self->{X_gc}, $self->{options}->{"LINEWIDTH"}, $self->{options}->{"LINESTYLE"});
+	_XSetForeground($self->{X_disp}, $self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
+	_XDrawArc($self->{X_disp}, $self->{X_win}, $self->{X_gc}, ($x-$a/2), ($y-$b/2), $a, $b, 0, 360*64);
 }
 
 EOD
@@ -979,7 +1054,7 @@ Returns the x & y locations of the next mouse click in the window.
 
 =head1 KNOWN ISSUES
 
-The module currently has two (somewhat related) problems. The first is that if you close one of the windows with the mouse you will close all the windows (or at least thats how it works on my OS-X box). The second is that objects are not aware that their associated windows have been closed, so when you next use one of the objects your program will halt with a broken pipe. If you want to close a single window you can due this by setting it equal to undef (i.e. $win1 = undef;). I'm currently working on trying to resolve both of these issues & suggestions by X masters are welcomed.
+In order to keep from crashing hard when an X window is closed by the mouse, this module has its own SIGPIPE error handler. Hopefully this will not conflict with possibly similar error handlers created by other modules.
 
 Font handling is poorly implemented, again suggestions on a better approach are welcomed.
 
@@ -991,7 +1066,7 @@ Depending on the context RGB triples do not always give you the color you might 
 
 =head1 AUTHOR
 
-Hazen Babcock (hbabcockos1@mac.com)
+Hazen Babcock (hbabcockos1 at mac.com)
 
 This library is free software; you can redistribute it and/or modify it under the same terms as Perl itself.
 

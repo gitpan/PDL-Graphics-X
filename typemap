@@ -1,2 +1,3 @@
+Display *	T_PTR
 Window * 	T_PTR
 GC *		T_PTR
