@@ -10,3 +10,12 @@ Revision history for Perl extension PDL::Graphics::X.
 	     line
 	     text
 	     cursor
+	     
+0.02  Mon Feb 21 2005
+		Cleaned up handling of Window * & GC * passed through pp_def as 
+		   suggested by Andres Jordan
+	   added the following functions (with no fill option as yet):
+		 rect
+		 circle
+		 ellipse
+		   

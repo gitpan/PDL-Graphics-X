@@ -1,4 +1,4 @@
-$VERSION = '0.01';
+$VERSION = '0.02';
 
 pp_bless('PDL::Graphics::X');
 
@@ -12,6 +12,10 @@ pp_bless('PDL::Graphics::X');
 # and the window & (eventually...) making sure that the window has not been 
 # destroyed in some other way (i.e. the user closed the window directly w/ the mouse).
 #
+# Since this is module is still being developed it is a little messy with 
+# extra code, etc... Mostly (desparate) attempts to figure out how to catch Bad
+# Windows.
+#
 # Not the best convention perhaps, but routines that I wrote that call X
 # start with '_X' and "real" X routines start with 'X'.
 #
@@ -24,17 +28,31 @@ pp_bless('PDL::Graphics::X');
 ###
 
 pp_addhdr('
-	#include <X11/X.h>
-	#include <X11/Xlib.h>
-	#include <X11/Xutil.h>
-	#include <X11/cursorfont.h>
 
-	static int screen;
-	static Display *display;
-	static Window root_window;
-	
-	static Window *hack_win;
-	static GC *hack_gc;
+/*
+ * includes & defines
+ */
+
+#include <X11/X.h>
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <X11/cursorfont.h>
+
+static int screen;
+static Display *display;
+static Window root_window;
+
+/*
+ * sub-routines
+ */
+
+/* error handler */
+/*
+int myErrorHandler(Display* display, XErrorEvent* event){
+	printf("error\n");
+	printf("%d %c %c %c\n", event->serial, event->error_code, event->request_code, event->minor_code);
+    return 0;}	
+*/
 ');
 
 ###
@@ -58,6 +76,9 @@ _XInitialize()
 			is_good = 1;
 			screen = DefaultScreen(display);
 			root_window = RootWindow(display,screen);
+
+#			XSetErrorHandler(myErrorHandler);
+#			XSynchronize(display, TRUE); 
 		}
 		RETVAL = is_good;
 	OUTPUT:
@@ -77,7 +98,7 @@ _XNewWindow(sx, sy, bg)
 		*X_win = XCreateSimpleWindow(display, root_window, 0, 0, sx, sy, 1, 0, bg);
 		XMapWindow(display, *X_win);
 		XFlush(display);
-		XSelectInput(display, *X_win, NoEventMask);
+		XSelectInput(display, *X_win, SubstructureNotifyMask);
 		RETVAL = X_win;
 	OUTPUT:
 		RETVAL
@@ -171,6 +192,22 @@ _XDrawRectangle(X_win, X_gc, x, y, width, height)
 		XDrawRectangle(display, *X_win, *X_gc, x, y, width, height);
 		XFlush(display);
 
+# draw a arc in a window
+
+void
+_XDrawArc(X_win, X_gc, x, y, width, height, angle1, angle2)
+	Window *X_win
+	GC *X_gc
+	int x
+	int y
+	int width
+	int height
+	int angle1
+	int angle2
+	CODE:
+		XDrawArc(display, *X_win, *X_gc, x, y, width, height, angle1, angle2);
+		XFlush(display);
+		
 # draw a string in a window
 
 void
@@ -251,7 +288,7 @@ _XGetMouse(X_win)
 		XSelectInput(display, *X_win, ButtonReleaseMask);
 		XMaskEvent(display, ButtonReleaseMask, &aEvent);
 		sprintf(temp, "%d %d", aEvent.xbutton.x, aEvent.xbutton.y);
-		XSelectInput(display, *X_win, NoEventMask);
+		XSelectInput(display, *X_win, SubstructureNotifyMask);
 		XUndefineCursor(display, *X_win);
 		XFlush(display);
 		
@@ -296,16 +333,23 @@ _XLoadFont(X_gc, font_name)
 		the_font = XLoadFont(display, font_name);
 		XSetFont(display, *X_gc, the_font);
 
-# hack-o-rama until I can figure out how to extend the PDL::PP typemap
+# check whether the window has been "externally" destroyed
+# NOTE : this doesn't work... written for debugging
 
 void
-_XPDLPPHack(X_win, X_gc)
+_XCheck(X_win)
 	Window *X_win
-	GC *X_gc
 	CODE:
-		hack_win = X_win;
-		hack_gc = X_gc;
+		XEvent report;
 		
+		XFlush(display);
+#		while(XCheckWindowEvent(display, *X_win, SubstructureNotifyMask, &report)){
+		printf("checking for events %d\n", display);
+		while(XCheckMaskEvent(display, SubstructureNotifyMask, &report)){
+			printf("event\n");
+			printf("%d %d\n", report.type, ConfigureNotify);
+		}
+
 EOC
 
 ###
@@ -316,13 +360,14 @@ EOC
 
 pp_def('_XPolyLine',
 	Pars => 'x(n); y(n)',
+	OtherPars => 'int X_win; int X_gc',
 	GenericTypes => [L],
 	Code => '
 		int i,j;
 		
 		for(i=0;i<($SIZE(n)-1);i++){
 			j = i+1;
-			XDrawLine(display, *hack_win, *hack_gc, $x(n=>i), $y(n=>i), $x(n=>j), $y(n=>j));
+			XDrawLine(display, $COMP(X_win), *((GC *)$COMP(X_gc)), $x(n=>i), $y(n=>i), $x(n=>j), $y(n=>j));
 		}
 		XFlush(display);
 ');
@@ -331,19 +376,19 @@ pp_def('_XPolyLine',
 
 pp_def('_XDrawBitmap',
 	Pars => 'bm(n,m)',
-	OtherPars => 'int x; int y',
+	OtherPars => 'int x; int y; int X_win; int X_gc',
 	GenericTypes => [L],
 	Code => '
 		int i, j;
 		XImage *picture;
 		
-		picture = XGetImage(display, *hack_win, 0, 0, $SIZE(n), $SIZE(m), AllPlanes, ZPixmap);
+		picture = XGetImage(display, *((Window *)$COMP(X_win)), 0, 0, $SIZE(n), $SIZE(m), AllPlanes, ZPixmap);
 		for(i=0;i<$SIZE(n);i++){
 			for(j=0;j<$SIZE(m);j++){
 				XPutPixel(picture, i, j, $bm(n=>i,m=>j));
 			}
 		}
-		XPutImage(display, *hack_win, *hack_gc, picture, 0, 0, $COMP(x), $COMP(y), $SIZE(n), $SIZE(m));
+		XPutImage(display, *((Window *)$COMP(X_win)), *((GC *)$COMP(X_gc)), picture, 0, 0, $COMP(x), $COMP(y), $SIZE(n), $SIZE(m));
 		XDestroyImage(picture);
 		XFlush(display);
 ');
@@ -454,6 +499,13 @@ sub new {
 		print "X initialize failed\n";
 		return undef;
 	}
+}
+
+# check whether this window still exists
+
+sub we_exist {
+	my $self = shift;
+	_XCheck($self->{X_win});
 }
 
 # catch object destroy so that we can close the X window & free up the associated memory
@@ -567,8 +619,7 @@ sub imag {
 
 	# display the image
 
-	_XPDLPPHack($self->{X_win}, $self->{X_gc});
-	_XDrawBitmap($the_bitmap, $dopt{"DEST_X"}, $dopt{"DEST_Y"});
+	_XDrawBitmap($the_bitmap, $dopt{"DEST_X"}, $dopt{"DEST_Y"}, $self->{X_win}, $self->{X_gc});
 }
 
 # Makes a local copy of a user supplied color table. It is assumed that the color 
@@ -611,8 +662,7 @@ sub line {
 	}
 	_XLineStyle($self->{X_gc}, $self->{options}->{"LINEWIDTH"}, $self->{options}->{"LINESTYLE"});
 	_XSetForeground($self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
-	_XPDLPPHack($self->{X_win}, $self->{X_gc});
-	_XPolyLine($x, $y);
+	_XPolyLine($x, $y, $self->{X_win}, $self->{X_gc});
 }
 
 # erases the window
@@ -658,6 +708,60 @@ sub cursor {
 	return ($x, $y);
 }
 
+# draws a rectangle
+
+sub rect {
+	my $self = shift;
+	my ($x1, $y1, $x2, $y2, $options) = @_;
+
+	if(defined($y2)) {
+		if (defined($options)){ _parseOptions($options, $self->{options}); }
+	} else {
+		print "$warning_message you must specify : x1, y1, x2, y2 for rect\n";
+		return 0;
+	}
+	
+	_XLineStyle($self->{X_gc}, $self->{options}->{"LINEWIDTH"}, $self->{options}->{"LINESTYLE"});
+	_XSetForeground($self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
+	_XDrawRectangle($self->{X_win}, $self->{X_gc}, $x1, $y1, ($x2-$x1), ($y2-$y1));
+}
+
+# draw a circle
+
+sub circle {
+	my $self = shift;
+	my ($x, $y, $r, $options) = @_;
+
+	if(defined($r)) {
+		if (defined($options)){ _parseOptions($options, $self->{options}); }
+	} else {
+		print "$warning_message you must specify : x, y, r for circle\n";
+		return 0;
+	}
+	
+	_XLineStyle($self->{X_gc}, $self->{options}->{"LINEWIDTH"}, $self->{options}->{"LINESTYLE"});
+	_XSetForeground($self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
+	_XDrawArc($self->{X_win}, $self->{X_gc}, ($x-$r), ($y-$r), 2*$r, 2*$r, 0, 360*64);
+}
+
+# draw an ellipse
+
+sub ellipse {
+	my $self = shift;
+	my ($x, $y, $a, $b, $options) = @_;
+
+	if(defined($b)) {
+		if (defined($options)){ _parseOptions($options, $self->{options}); }
+	} else {
+		print "$warning_message you must specify : x, y, a, b for ellipse\n";
+		return 0;
+	}
+	
+	_XLineStyle($self->{X_gc}, $self->{options}->{"LINEWIDTH"}, $self->{options}->{"LINESTYLE"});
+	_XSetForeground($self->{X_gc}, _RGBToLong($self->{options}->{"COLOR"}));
+	_XDrawArc($self->{X_win}, $self->{X_gc}, ($x-$a/2), ($y-$b/2), $a, $b, 0, 360*64);
+}
+
 EOD
 
 # this is a OO module, so export nothing
@@ -698,6 +802,8 @@ PDL::Graphics::X - PDL OO access to X windows
 =head1 DESCRIPTION
 
 This module interfaces PDL directly to X windows in a OO fashion. Each X object has an associated X window and handles opening, closing and drawing in the associated window. Hopefully it is reasonably intuitive to use. The vision is that this will serve as a base upon which other fully native PDL graphics modules could be built.
+
+Common options such as LINEWIDTH are remembered from function call to function call, i.e. if you call $win1->line($x, $y, {COLOR => [1,0,0], LINEWIDTH => 5}) then the rectangle drawn by $win1->rect(10, 10, 190, 190) will also have a red border of width equal to 5.
 
 =head1 FUNCTIONS
 
@@ -775,6 +881,60 @@ Options recognized
   LINESTYLE - line style (0 = normal, 1 = dashed)
       COLOR - [r, g, b] color of the line
 
+=head2 rect
+
+=for ref
+
+Draws a rectangle.
+
+=for usage
+
+  Usage: $win1->rect($x1, $y1, $x2, $y2);
+
+Draws a rectangle with corners at ($x1, $y1) and ($x2, $y2).
+
+Options recognized
+
+  LINEWIDTH - line width
+  LINESTYLE - line style (0 = normal, 1 = dashed)
+      COLOR - [r, g, b] color of the line
+
+=head2 circle
+
+=for ref
+
+Draws a circle.
+
+=for usage
+
+  Usage: $win1->circle($x, $y, $r);
+
+Draws a circle centered at ($x, $y) with radius $r.
+
+Options recognized
+
+  LINEWIDTH - line width
+  LINESTYLE - line style (0 = normal, 1 = dashed)
+      COLOR - [r, g, b] color of the line
+
+=head2 ellipse
+
+=for ref
+
+Draws an oval.
+
+=for usage
+
+  Usage: $win1->ellipse($x, $y, $a, $b);
+
+Draws a oval centered at ($x, $y) with x size $a and y size $b.
+
+Options recognized
+
+  LINEWIDTH - line width
+  LINESTYLE - line style (0 = normal, 1 = dashed)
+      COLOR - [r, g, b] color of the line
+
 =head2 erase
 
 =for ref
@@ -819,7 +979,7 @@ Returns the x & y locations of the next mouse click in the window.
 
 =head1 KNOWN ISSUES
 
-The module currently has two (somewhat related) problems. The first is that if you close one of the windows with the mouse you will close all the windows (or at least thats how it works on my OS-X box). The second is that objects are not aware that their associated windows have been closed, so when you next use one of the objects your program will crash due to a memory error. If you want to close a single window you can due this by setting it equal to undef (i.e. $win1 = undef;). I'm currently working on trying to resolve both of these issues & suggestions by X masters are welcomed.
+The module currently has two (somewhat related) problems. The first is that if you close one of the windows with the mouse you will close all the windows (or at least thats how it works on my OS-X box). The second is that objects are not aware that their associated windows have been closed, so when you next use one of the objects your program will halt with a broken pipe. If you want to close a single window you can due this by setting it equal to undef (i.e. $win1 = undef;). I'm currently working on trying to resolve both of these issues & suggestions by X masters are welcomed.
 
 Font handling is poorly implemented, again suggestions on a better approach are welcomed.
 
